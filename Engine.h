@@ -82,4 +82,25 @@ namespace FalseEdgeVR
 	
 	// Check if player is currently blocking
 	bool IsBlocking();
+
+	// ============================================
+	// Weapon Scaling (HIGGS grabbed weapons)
+	// ============================================
+	
+	// Scale a world object (weapon) to a target scale
+	// This sets both local and world transform scales and updates all child nodes
+	void ScaleWorldObject(TESObjectREFR* refr, float targetScale);
+	
+	// Track a grabbed weapon for continuous scale updates
+	// isLeftVRController: which VR controller hand grabbed it
+	void TrackGrabbedWeapon(TESObjectREFR* weaponRefr, bool isLeftVRController);
+	
+	// Clear tracking for a grabbed weapon when dropped
+	void ClearGrabbedWeapon(bool isLeftVRController);
+	
+	// Update scales for all tracked grabbed weapons (call each frame)
+	void UpdateGrabbedWeaponScales();
+	
+	// Get the currently tracked grabbed weapon for a hand
+	TESObjectREFR* GetGrabbedWeapon(bool isLeftVRController);
 }

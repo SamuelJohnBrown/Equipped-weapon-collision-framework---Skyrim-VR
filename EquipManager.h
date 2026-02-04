@@ -95,6 +95,9 @@ namespace FalseEdgeVR
         
      // Flag to suppress weapon draw sound during internal collision re-equip
         static bool s_suppressDrawSound;
+        
+     // Flag to suppress weapon sheath sound during internal collision unequip
+ static bool s_suppressSheathSound;
    
      // Update equipment state from current player equipped items
         void UpdateEquipmentState();
@@ -122,6 +125,12 @@ namespace FalseEdgeVR
         
         // Check if form is a shield
         static bool IsShield(TESForm* form);
+        
+   // Check if form is a two-handed weapon, bow, staff, or crossbow
+        static bool IsTwoHandedWeapon(TESForm* form);
+   
+        // Check if the player currently has a 2H weapon equipped
+        static bool PlayerHasTwoHandedEquipped();
         
         // ============================================
         // Forced Equip/Unequip Functions

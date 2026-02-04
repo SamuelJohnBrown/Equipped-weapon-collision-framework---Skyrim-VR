@@ -71,6 +71,10 @@ namespace FalseEdgeVR {
 	// Equipment change grace period
 	extern int equipGraceFrames;         // Frames to wait after equipment change before collision detection
 
+	// Grabbed weapon scaling settings
+	extern bool weaponScalingEnabled;   // Enable/disable weapon scaling when HIGGS grabbed
+	extern float weaponGrabbedScale;     // Scale factor for grabbed weapons (1.0 = 100%, 0.8 = 80%)
+
 	void loadConfig();
 	
 	void Log(const int msgLogLevel, const char* fmt, ...);

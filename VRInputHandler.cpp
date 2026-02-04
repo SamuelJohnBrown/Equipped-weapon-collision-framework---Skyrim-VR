@@ -194,15 +194,18 @@ handler->m_leftHandOnCooldown = false;
  // handler->CheckShieldCollisionTimeout(deltaTime); // DISABLED - trigger system handles this
    
         // RE-ENABLED: Auto-equip grabbed weapons (needed for world object grab -> equip -> trigger system)
-        handler->CheckAutoEquipGrabbedWeapon(deltaTime);
+      handler->CheckAutoEquipGrabbedWeapon(deltaTime);
         
         // Update shield bash tracking (still needed for shield bash detection)
-        handler->UpdateShieldBashTracking(deltaTime);
+    handler->UpdateShieldBashTracking(deltaTime);
+  
+        // Update grabbed weapon scales (keeps weapons scaled while held by HIGGS)
+        UpdateGrabbedWeaponScales();
       
-        // ALWAYS update weapon geometry and shield collision tracking
+  // ALWAYS update weapon geometry and shield collision tracking
     // These trackers handle their own equipment checks internally
       UpdateWeaponGeometry(deltaTime);
-     UpdateShieldCollision(deltaTime);
+  UpdateShieldCollision(deltaTime);
     }
     
 
@@ -533,20 +536,20 @@ if (shieldDropped && higgsInterface)
     TESObjectREFR* grabbed = higgsInterface->GetGrabbedObject(weaponVRControllerIsLeft);
     if (grabbed == shieldDropped && grabbed->baseForm)
     {
-        _MESSAGE("VRInputHandler: Close combat - force equipping %s collision-avoidance weapon", weaponHandIsLeft ? "LEFT" : "RIGHT");
+  _MESSAGE("VRInputHandler: Close combat - force equipping %s collision-avoidance weapon", weaponHandIsLeft ? "LEFT" : "RIGHT");
 
         // Suppress pickup sound during internal re-equip
-        EquipManager::s_suppressPickupSound = true;
-        bool activated = SafeActivate(grabbed, player, 0, 0, 1, false);
-        EquipManager::s_suppressPickupSound = false;
-        if (activated)
+   EquipManager::s_suppressPickupSound = true;
+      bool activated = SafeActivate(grabbed, player, 0, 0, 1, false);
+    EquipManager::s_suppressPickupSound = false;
+  if (activated)
         {
             // Re-equip using cached FormID (suppress draw sound)
-            EquipManager::s_suppressDrawSound = true;
-            if (weaponHandIsLeft)
-                EquipManager::GetSingleton()->ForceReequipLeftHand();
-            else
-                EquipManager::GetSingleton()->ForceReequipRightHand();
+      EquipManager::s_suppressDrawSound = true;
+  if (weaponHandIsLeft)
+          EquipManager::GetSingleton()->ForceReequipLeftHand();
+      else
+ EquipManager::GetSingleton()->ForceReequipRightHand();
             EquipManager::s_suppressDrawSound = false;
         }
 
@@ -685,25 +688,46 @@ if (shieldDropped && higgsInterface)
     // Check if this is a valid 1H weapon we track (not 2H, bows, staffs, bound weapons, excluded items)
        if (!EquipManager::IsWeapon(baseForm))
    {
-     _MESSAGE("VRInputHandler: Grabbed weapon is excluded type (2H/bow/staff/bound/etc) - not registering with trigger system");
-  return;
+    _MESSAGE("VRInputHandler: Grabbed weapon is excluded type (2H/bow/staff/bound/etc) - not registering with trigger system");
+   return;
     }
   
-     // Check if this grab is from our collision avoidance system
-        // If so, skip auto-equip - our system will handle it
+   // Check if this grab is from our collision avoidance system
+      // If so, skip auto-equip - our system will handle it
   bool isFromCollisionAvoidance = EquipManager::GetSingleton()->HasPendingReequip(isLeftGameHand);
     
     if (isFromCollisionAvoidance)
-          {
+      {
   _MESSAGE("VRInputHandler: Grabbed weapon is from collision avoidance - skipping auto-equip");
-    return;
+  return;
     }
    
-  // Check if the target game hand has a spell/scroll equipped
-            // If so, don't auto-equip - player wants to keep their spell
-            PlayerCharacter* player = *g_thePlayer;
-            if (player)
+ // ============================================
+ // CHECK IF PLAYER HAS 2H WEAPON EQUIPPED
+   // If so, just pick up the weapon normally without auto-equip
+   // The HIGGS grab will be converted to a normal inventory pickup
+  // ============================================
+if (EquipManager::PlayerHasTwoHandedEquipped())
             {
+       _MESSAGE("VRInputHandler: Player has 2H weapon equipped - picking up grabbed weapon to inventory only");
+       
+   PlayerCharacter* player = *g_thePlayer;
+       if (player)
+    {
+             // Just activate (pick up) the weapon - don't auto-equip
+            // This adds it to inventory and the world object is consumed
+  EquipManager::s_suppressPickupSound = false;  // Allow normal pickup sound
+       SafeActivate(grabbedRefr, player, 0, 0, 1, false);
+       _MESSAGE("VRInputHandler: Weapon picked up to inventory (2H equipped, no auto-equip)");
+           }
+    return;
+            }
+   
+  // Check if the target game hand has a spell/scroll equipped
+          // If so, don't auto-equip - player wants to keep their spell
+          PlayerCharacter* player = *g_thePlayer;
+          if (player)
+          {
       TESForm* currentlyEquipped = player->GetEquippedObject(isLeftGameHand);
      if (currentlyEquipped)
              {
@@ -719,22 +743,46 @@ if (shieldDropped && higgsInterface)
    
          // ============================================
      // AUTO-EQUIP GRABBED 1H WEAPON
-     // This will trigger OnEquip which will then HIGGS grab it
+ // This will trigger OnEquip which will then HIGGS grab it
       // (unless trigger is held) - registering it with our trigger system
        // ============================================
     _MESSAGE("VRInputHandler: Grabbed valid 1H weapon - auto-equipping to register with trigger system");
-          _MESSAGE("VRInputHandler: Auto-equipping to %s VR hand (game %s hand)", 
-      vrControllerName, gameHandName);
-        
+       _MESSAGE("VRInputHandler: Auto-equipping to %s VR hand (game %s hand)", 
+vrControllerName, gameHandName);
+     
+ // ============================================
+            // CHECK IF OTHER HAND WAS TRACKING THIS WEAPON
+            // If the weapon was grabbed from the other hand, clear that hand's tracking
+       // to prevent trigger press on old controller re-equipping it
+        // ============================================
+          bool otherHandIsLeft = !isLeftVRController;
+            bool otherGameHandIsLeft = !isLeftGameHand;
+     TESObjectREFR* otherHandDroppedWeapon = EquipManager::GetSingleton()->GetDroppedWeaponRef(otherGameHandIsLeft);
+            
+      if (otherHandDroppedWeapon == grabbedRefr)
+    {
+        _MESSAGE("VRInputHandler: Weapon was grabbed from OTHER hand - clearing other hand's tracking data");
+       _MESSAGE("VRInputHandler:   Clearing %s VR controller (game %s hand) tracking", 
+    otherHandIsLeft ? "Left" : "Right", otherGameHandIsLeft ? "Left" : "Right");
+     
+         // Clear the other hand's grabbed weapon scaling
+        ClearGrabbedWeapon(otherHandIsLeft);
+    
+         // Clear the other hand's EquipManager tracking
+         EquipManager::GetSingleton()->ClearDroppedWeaponRef(otherGameHandIsLeft);
+EquipManager::GetSingleton()->ClearPendingReequip(otherGameHandIsLeft);
+    EquipManager::GetSingleton()->ClearCachedWeaponFormID(otherGameHandIsLeft);
+     }
+      
   // Activate (pick up) the grabbed weapon - add to inventory
          if (player)
      {
-             // Suppress pickup sound since we're doing internal equip
+          // Suppress pickup sound since we're doing internal equip
          EquipManager::s_suppressPickupSound = true;
-    SafeActivate(grabbedRefr, player, 0, 0, 1, false);
+ SafeActivate(grabbedRefr, player, 0, 0, 1, false);
      EquipManager::s_suppressPickupSound = false;
   
-  // Store info for delayed equip using existing system
+// Store info for delayed equip using existing system
          UInt32 weaponFormID = baseForm->formID;
      
    // Use the auto-equip timer system
@@ -743,14 +791,14 @@ if (shieldDropped && higgsInterface)
   handler->m_autoEquipPendingLeft = true;
 handler->m_autoEquipTimerLeft = 0.0f;
    handler->m_autoEquipWeaponLeft = nullptr;  // Ref was activated, use FormID
-          handler->m_autoEquipFormIDLeft = weaponFormID;
-    }
+        handler->m_autoEquipFormIDLeft = weaponFormID;
+  }
         else
            {
      handler->m_autoEquipPendingRight = true;
-     handler->m_autoEquipTimerRight = 0.0f;
+   handler->m_autoEquipTimerRight = 0.0f;
    handler->m_autoEquipWeaponRight = nullptr;  // Ref was activated, use FormID
-             handler->m_autoEquipFormIDRight = weaponFormID;
+       handler->m_autoEquipFormIDRight = weaponFormID;
         }
    }
    }
@@ -1368,7 +1416,7 @@ m_leftHandCooldownTimer = 0.0f;
         {
          m_autoEquipTimerLeft += deltaTime;
        
-   if (m_autoEquipTimerLeft >= 0.05f)  // 50ms delay to let pickup complete
+   if (m_autoEquipTimerLeft >= 0.025f)  // 25ms delay to let pickup complete
             {
      _MESSAGE("VRInputHandler: Auto-equipping grabbed weapon to LEFT game hand (FormID: %08X)", 
     m_autoEquipFormIDLeft);
@@ -1404,7 +1452,7 @@ m_leftHandCooldownTimer = 0.0f;
     {
     m_autoEquipTimerRight += deltaTime;
       
-            if (m_autoEquipTimerRight >= 0.05f)  // 50ms delay to let pickup complete
+      if (m_autoEquipTimerRight >= 0.025f)  // 25ms delay to let pickup complete
      {
      _MESSAGE("VRInputHandler: Auto-equipping grabbed weapon to RIGHT game hand (FormID: %08X)", 
        m_autoEquipFormIDRight);
@@ -2074,18 +2122,22 @@ m_autoEquipTimerRight = 0.0f;
    
         // Clear shield bash tracking completely on death/load
         m_shieldBashCount = 0;
-        m_shieldBashWindowTimer = 0.0f;
+  m_shieldBashWindowTimer = 0.0f;
         m_shieldBashLockoutActive = false;
-        m_shieldBashLockoutTimer = 0.0f;
+    m_shieldBashLockoutTimer = 0.0f;
     
-      EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
-        EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
-        EquipManager::GetSingleton()->ClearPendingReequip(true);
-        EquipManager::GetSingleton()->ClearPendingReequip(false);
-        EquipManager::GetSingleton()->ClearCachedWeaponFormID(true);
+      // Clear grabbed weapon scaling (restores scale to 1.0 if still valid)
+        ClearGrabbedWeapon(true);
+ ClearGrabbedWeapon(false);
+        
+    EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
+ EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
+    EquipManager::GetSingleton()->ClearPendingReequip(true);
+     EquipManager::GetSingleton()->ClearPendingReequip(false);
+    EquipManager::GetSingleton()->ClearCachedWeaponFormID(true);
 EquipManager::GetSingleton()->ClearCachedWeaponFormID(false);
         
-   _MESSAGE("VRInputHandler: All tracking state cleared");
+_MESSAGE("VRInputHandler: All tracking state cleared");
     }
 
     float VRInputHandler::GetGrabbedWeaponVelocity(bool isLeftGameHand) const
@@ -2208,25 +2260,26 @@ return 0.0f;
     // Verify the reference is still valid before accessing it
  bool isValid = false;
        __try {
-          isValid = (droppedWeaponLeft->baseForm != nullptr && 
-         droppedWeaponLeft->formType == kFormType_Reference);
+ isValid = (droppedWeaponLeft->baseForm != nullptr && 
+   droppedWeaponLeft->formType == kFormType_Reference);
   }
      __except(EXCEPTION_EXECUTE_HANDLER) {
-           _MESSAGE("VRInputHandler: LEFT hand dropped weapon reference is INVALID (exception) - clearing");
+   _MESSAGE("VRInputHandler: LEFT hand dropped weapon reference is INVALID (exception) - clearing");
+      ClearGrabbedWeapon(GameHandToVRController(true));
      EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
-                EquipManager::GetSingleton()->ClearPendingReequip(true);
+     EquipManager::GetSingleton()->ClearPendingReequip(true);
      droppedWeaponLeft = nullptr;
   }
       
-         if (droppedWeaponLeft && isValid)
+      if (droppedWeaponLeft && isValid)
             {
             bool leftVRTrigger = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
 
-            if (leftVRTrigger)
+        if (leftVRTrigger)
  {
-                _MESSAGE("VRInputHandler: LEFT hand TRIGGER HELD - Re-equipping grabbed weapon");
-    
-        bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(true);
+         _MESSAGE("VRInputHandler: LEFT hand TRIGGER HELD - Re-equipping grabbed weapon");
+  
+   bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(true);
    
    PlayerCharacter* player = *g_thePlayer;
                 if (player)
@@ -2237,11 +2290,14 @@ return 0.0f;
  }
         else
        {
-          EquipManager::s_suppressPickupSound = true;
+    EquipManager::s_suppressPickupSound = true;
        SafeActivate(droppedWeaponLeft, player, 0, 0, 1, false);
      EquipManager::s_suppressPickupSound = false;
     }
 
+     // Clear grabbed weapon tracking (restores scale to 1.0)
+     ClearGrabbedWeapon(GameHandToVRController(true));
+     
         EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
     EquipManager::GetSingleton()->ClearPendingReequip(true);
      
@@ -2267,12 +2323,13 @@ return 0.0f;
      }
         __except(EXCEPTION_EXECUTE_HANDLER) {
         _MESSAGE("VRInputHandler: RIGHT hand dropped weapon reference is INVALID (exception) - clearing");
+        ClearGrabbedWeapon(GameHandToVRController(false));
      EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
          EquipManager::GetSingleton()->ClearPendingReequip(false);
          droppedWeaponRight = nullptr;
-   }
+ }
         
-     if (droppedWeaponRight && isValid)
+   if (droppedWeaponRight && isValid)
      {
  bool rightVRTrigger = GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed;
         
@@ -2284,18 +2341,21 @@ return 0.0f;
        
     PlayerCharacter* player = *g_thePlayer;
  if (player)
-          {
+        {
       if (wasDualWieldingSame)
      {
      DeleteWorldObject(droppedWeaponRight);
      }
     else
-          {
+        {
         EquipManager::s_suppressPickupSound = true;
        SafeActivate(droppedWeaponRight, player, 0, 0, 1, false);
         EquipManager::s_suppressPickupSound = false;
        }
 
+     // Clear grabbed weapon tracking (restores scale to 1.0)
+     ClearGrabbedWeapon(GameHandToVRController(false));
+     
       EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
       EquipManager::GetSingleton()->ClearPendingReequip(false);
      

@@ -3,6 +3,7 @@
 #include "Engine.h"
 #include "ShieldCollision.h"
 #include "SkyrimVRESLAPI.h"
+#include "ActivateHook.h"
 #include "skse64/GameData.h"
 #include "skse64/GameForms.h"
 #include "skse64/GameExtraData.h"
@@ -21,12 +22,20 @@ namespace FalseEdgeVR
   // Static member initialization
     bool EquipManager::s_suppressPickupSound = false;
     bool EquipManager::s_suppressDrawSound = false;
+    bool EquipManager::s_suppressSheathSound = false;
 
     // Per-weapon draw cooldowns (prevent same weapon draw sound within cooldown after unequip)
     // Key: weapon FormID, Value: time when weapon was UNEQUIPPED
     static std::unordered_map<UInt32, std::chrono::steady_clock::time_point> s_lastUnequipTimes;
+    
+    // Per-weapon sheath cooldowns (prevent same weapon sheath sound within cooldown after equip)
+    // Key: weapon FormID, Value: time when weapon was EQUIPPED
+    static std::unordered_map<UInt32, std::chrono::steady_clock::time_point> s_lastEquipTimes;
+    
     static std::mutex s_drawMutex;
+    static std::mutex s_sheathMutex;
     static const int DRAW_SOUND_COOLDOWN_SECONDS = 5;
+    static const int SHEATH_SOUND_COOLDOWN_SECONDS = 5;
 
     // ============================================
     // Delayed Equip Weapon Task (runs on game thread)
@@ -66,8 +75,13 @@ namespace FalseEdgeVR
             // Get the appropriate slot for left or right hand
             BGSEquipSlot* slot = m_equipToLeftHand ? GetLeftHandSlot() : GetRightHandSlot();
 
-            // EquipItem params: actor, item, extraData, count, slot, withEquipSound, preventUnequip, showMsg, unk
-            CALL_MEMBER_FN(equipMan, EquipItem)(player, weaponForm, nullptr,1, slot, false, true, false, nullptr);
+            // Suppress draw sound during delayed equip
+            EquipManager::s_suppressDrawSound = true;
+        
+ // EquipItem params: actor, item, extraData, count, slot, withEquipSound, preventUnequip, showMsg, unk
+            CALL_MEMBER_FN(equipMan, EquipItem)(player, weaponForm, nullptr, 1, slot, false, true, false, nullptr);
+          
+  EquipManager::s_suppressDrawSound = false;
             _MESSAGE("[DelayedEquipWeapon] Equipped weapon %08X to %s hand (silent)", m_weaponFormId, m_equipToLeftHand ? "LEFT" : "RIGHT");
         }
 
@@ -141,22 +155,69 @@ namespace FalseEdgeVR
         if (!item)
  return kEvent_Continue;
 
+        bool isEquipping = evn->equipped;
+
         // Check if this is a one-handed weapon we track
         if (!EquipManager::IsWeapon(item))
   {
-        // For player, also check shields
+    // For player, also check shields
     if (actor == *g_thePlayer && EquipManager::IsShield(item))
-            {
-          // Continue to player handling below
+ {
+    // Continue to player handling below
 }
-            else
+else
    {
+    // ============================================
+// CHECK FOR 2H WEAPON EQUIP - CLEAN UP GRABBED WEAPONS
+   // When player equips a 2H weapon, any grabbed weapons need to be
+// picked up to inventory and tracking cleared
+     // ============================================
+  if (actor == *g_thePlayer && isEquipping && EquipManager::IsTwoHandedWeapon(item))
+  {
+        _MESSAGE("EquipEventHandler: Player equipped 2H weapon - checking for grabbed weapons to clean up");
+        
+PlayerCharacter* player = *g_thePlayer;
+        EquipManager* equipMgr = EquipManager::GetSingleton();
+     
+      // Check left hand for grabbed weapon
+  TESObjectREFR* droppedLeft = equipMgr->GetDroppedWeaponRef(true);
+ if (droppedLeft)
+     {
+            _MESSAGE("EquipEventHandler: Found grabbed weapon in LEFT hand - picking up to inventory");
+        if (player)
+    {
+     EquipManager::s_suppressPickupSound = true;
+SafeActivate(droppedLeft, player, 0, 0, 1, false);
+        EquipManager::s_suppressPickupSound = false;
+      }
+        ClearGrabbedWeapon(GameHandToVRController(true));
+   equipMgr->ClearDroppedWeaponRef(true);
+            equipMgr->ClearPendingReequip(true);
+      equipMgr->ClearCachedWeaponFormID(true);
+   }
+        
+      // Check right hand for grabbed weapon
+  TESObjectREFR* droppedRight = equipMgr->GetDroppedWeaponRef(false);
+   if (droppedRight)
+        {
+     _MESSAGE("EquipEventHandler: Found grabbed weapon in RIGHT hand - picking up to inventory");
+  if (player)
+            {
+         EquipManager::s_suppressPickupSound = true;
+ SafeActivate(droppedRight, player, 0, 0, 1, false);
+     EquipManager::s_suppressPickupSound = false;
+    }
+   ClearGrabbedWeapon(GameHandToVRController(false));
+ equipMgr->ClearDroppedWeaponRef(false);
+         equipMgr->ClearPendingReequip(false);
+   equipMgr->ClearCachedWeaponFormID(false);
+     }
+    }
+    
     return kEvent_Continue;
-            }
+   }
     }
 
-        bool isEquipping = evn->equipped;
-        
         // ============================================
         // NPC EQUIP TRACKING (within 1000 units of player)
       // ============================================
@@ -229,6 +290,79 @@ case WeaponType::Axe:
  }
      return kEvent_Continue;
     }
+
+        // ============================================
+        // NPC UNEQUIP TRACKING (within 1000 units of player)
+        // ============================================
+  if (actor != *g_thePlayer && !isEquipping)
+        {
+        PlayerCharacter* player = *g_thePlayer;
+      if (player)
+            {
+                // Calculate distance to player
+  float dx = actor->pos.x - player->pos.x;
+         float dy = actor->pos.y - player->pos.y;
+                float dz = actor->pos.z - player->pos.z;
+    float distance = sqrt(dx*dx + dy*dy + dz*dz);
+            
+ // Only play sound if within 1000 units
+     if (distance <= 1000.0f)
+ {
+         WeaponType type = EquipManager::GetWeaponType(item);
+                const char* npcName = CALL_MEMBER_FN(actor, GetReferenceName)();
+     
+                    // Cache sheath sound FormIDs from Fake Edge VR.esp (ESL-flagged)
+  // Base FormIDs: Dagger=0x80A, Sword=0x80B, Axe=0x80C, Mace=0x80D
+     static UInt32 cachedDaggerSheathSound = 0;
+    static UInt32 cachedSwordSheathSound = 0;
+                    static UInt32 cachedAxeSheathSound = 0;
+         static UInt32 cachedMaceSheathSound = 0;
+     static bool sheathSoundsCached = false;
+    
+                    if (!sheathSoundsCached)
+  {
+          cachedDaggerSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80A);
+   cachedSwordSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80B);
+        cachedAxeSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80C);
+    cachedMaceSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80D);
+         sheathSoundsCached = true;
+            _MESSAGE("EquipManager: Cached weapon sheath sounds - Dagger:%08X, Sword:%08X, Axe:%08X, Mace:%08X",
+      cachedDaggerSheathSound, cachedSwordSheathSound, cachedAxeSheathSound, cachedMaceSheathSound);
+          }
+       
+           switch (type)
+  {
+            case WeaponType::Dagger:
+         _MESSAGE(">>> NPC UNEQUIPPED: DAGGER - NPC: %s (RefID: %08X), Distance: %.1f units, WeaponID: %08X",
+              npcName ? npcName : "Unknown", actor->formID, distance, item->formID);
+   if (cachedDaggerSheathSound != 0)
+    PlaySoundAtActor(cachedDaggerSheathSound, actor);
+      break;
+          case WeaponType::Sword:
+           _MESSAGE(">>> NPC UNEQUIPPED: 1H SWORD - NPC: %s (RefID: %08X), Distance: %.1f units, WeaponID: %08X",
+              npcName ? npcName : "Unknown", actor->formID, distance, item->formID);
+  if (cachedSwordSheathSound != 0)
+         PlaySoundAtActor(cachedSwordSheathSound, actor);
+       break;
+        case WeaponType::Mace:
+  _MESSAGE(">>> NPC UNEQUIPPED: 1H MACE - NPC: %s (RefID: %08X), Distance: %.1f units, WeaponID: %08X",
+       npcName ? npcName : "Unknown", actor->formID, distance, item->formID);
+ if (cachedMaceSheathSound != 0)
+          PlaySoundAtActor(cachedMaceSheathSound, actor);
+                  break;
+       case WeaponType::Axe:
+        _MESSAGE(">>> NPC UNEQUIPPED: 1H AXE - NPC: %s (RefID: %08X), Distance: %.1f units, WeaponID: %08X",
+                  npcName ? npcName : "Unknown", actor->formID, distance, item->formID);
+          if (cachedAxeSheathSound != 0)
+    PlaySoundAtActor(cachedAxeSheathSound, actor);
+        break;
+         default:
+   break;
+              }
+                }
+            }
+    return kEvent_Continue;
+        }
 
         // ============================================
         // PLAYER EQUIP TRACKING (existing logic)
@@ -490,10 +624,10 @@ if (!modIsLoaded)
     }
 
     // Check if a weapon is from iNeed Water VR mod and should be excluded
-    // Returns true if the weapon should NOT be tracked (waterskins, etc.)
+    // Returns true if the weapon should NOT be tracked (waterskins, etc.),
     static bool IsINeedWaterVRWeapon(UInt32 weaponFormID)
     {
-        // Check if iNeedWaterVR.esp is loaded
+    // Check if iNeedWaterVR.esp is loaded
         static bool checkedForMod = false;
         static bool modIsLoaded = false;
         static UInt8 modIndex = 0;
@@ -501,8 +635,8 @@ if (!modIsLoaded)
         if (!checkedForMod)
   {
        checkedForMod = true;
-          DataHandler* dataHandler = DataHandler::GetSingleton();
-            if (dataHandler)
+ DataHandler* dataHandler = DataHandler::GetSingleton();
+     if (dataHandler)
       {
     const ModInfo* modInfo = dataHandler->LookupModByName("iNeedWaterVR.esp");
  if (modInfo && modInfo->IsActive())
@@ -510,47 +644,104 @@ if (!modIsLoaded)
    modIsLoaded = true;
           modIndex = modInfo->GetPartialIndex();
     _MESSAGE("EquipManager: iNeedWaterVR.esp detected (index: %02X) - waterskin items will be excluded from tracking", modIndex);
-          }
-       }
+      }
   }
-        
+  }
+ 
  // If mod is not loaded, don't exclude anything
         if (!modIsLoaded)
      return false;
         
-        // Get the mod index from the weapon's FormID
-        UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
+      // Get the mod index from the weapon's FormID
+      UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
         
      // Check if the weapon is from the iNeed Water VR mod
-        if (weaponModIndex != modIndex)
+  if (weaponModIndex != modIndex)
      return false;
-        
+
      // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
  UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
    
-        // If it's an ESL (FE prefix), get the actual base ID
+     // If it's an ESL (FE prefix), get the actual base ID
         if ((weaponFormID >> 24) == 0xFE)
      {
         baseFormID = weaponFormID & 0x00000FFF;
         }
         
    // List of iNeed Water VR weapon base FormIDs to exclude:
-        // 0x005902 - Waterskin
+     // 0x005902 - Waterskin
      switch (baseFormID)
         {
-   case 0x005902:  // Waterskin
+   case 0x005902:// Waterskin
         _MESSAGE("EquipManager: Weapon %08X is an iNeed Water VR item (waterskin) - excluding from tracking", weaponFormID);
        return true;
 default:
          return false;
      }
+}
+
+    // Check if a weapon is from VR Immersive Smithing mod and should be excluded
+    // Returns true if the weapon should NOT be tracked (smithing tools, etc.),
+    static bool IsVRImmersiveSmithingWeapon(UInt32 weaponFormID)
+    {
+        // Check if VR_ImmersiveSmithing.esp is loaded
+        static bool checkedForMod = false;
+        static bool modIsLoaded = false;
+        static UInt8 modIndex = 0;
+        
+        if (!checkedForMod)
+        {
+ checkedForMod = true;
+         DataHandler* dataHandler = DataHandler::GetSingleton();
+         if (dataHandler)
+            {
+   const ModInfo* modInfo = dataHandler->LookupModByName("VR_ImmersiveSmithing.esp");
+    if (modInfo && modInfo->IsActive())
+           {
+       modIsLoaded = true;
+modIndex = modInfo->GetPartialIndex();
+     _MESSAGE("EquipManager: VR_ImmersiveSmithing.esp detected (index: %02X) - smithing tools will be excluded from tracking", modIndex);
+     }
+            }
+        }
+        
+        // If mod is not loaded, don't exclude anything
+        if (!modIsLoaded)
+            return false;
+     
+        // Get the mod index from the weapon's FormID
+        UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
+   
+      // Check if the weapon is from the VR Immersive Smithing mod
+ if (weaponModIndex != modIndex)
+   return false;
+    
+        // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
+        UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
+        
+        // If it's an ESL (FE prefix), get the actual base ID
+        if ((weaponFormID >> 24) == 0xFE)
+        {
+         baseFormID = weaponFormID & 0x00000FFF;
     }
+ 
+      // List of VR Immersive Smithing weapon base FormIDs to exclude:
+      // 0x005901 - Smithing tool
+        switch (baseFormID)
+        {
+    case 0x005901:  // Smithing tool
+  _MESSAGE("EquipManager: Weapon %08X is a VR Immersive Smithing item - excluding from tracking", weaponFormID);
+  return true;
+  default:
+ return false;
+      }
+ }
 
     // Combined check for items that should be completely excluded from weapon handling
-    // (Pipe Smoking VR items, Navigate VR, Bound Weapons, iNeed Water VR, etc.)
+    // (Pipe Smoking VR items, Navigate VR, Bound Weapons, iNeed Water VR, VR Immersive Smithing, etc.)
     static bool IsExcludedItem(UInt32 formID)
     {
-    return IsPipeSmokingWeapon(formID) || IsNavigateVRWeapon(formID) || IsBoundWeapon(formID) || IsINeedWaterVRWeapon(formID);
+  return IsPipeSmokingWeapon(formID) || IsNavigateVRWeapon(formID) || IsBoundWeapon(formID) || IsINeedWaterVRWeapon(formID) || IsVRImmersiveSmithingWeapon(formID);
     }
 
     void EquipManager::OnEquip(TESForm* item, Actor* actor, bool isLeftHand)
@@ -569,9 +760,18 @@ default:
 
   _MESSAGE("EquipManager: EQUIPPED %s in %s hand (FormID: %08X)", typeName, handName, item->formID);
         
+    // Record equip time for sheath sound cooldown
+        // Only track weapons (not shields)
+ if (type != WeaponType::Shield && type != WeaponType::None)
+        {
+    std::lock_guard<std::mutex> lock(s_sheathMutex);
+      s_lastEquipTimes[item->formID] = std::chrono::steady_clock::now();
+   _MESSAGE("EquipManager: Recorded equip time for weapon %08X (5s sheath sound cooldown started)", item->formID);
+        }
+     
         // ============================================
      // TRIGGER-BASED WEAPON HOLD: Auto-unequip weapon on equip
-        // ANY 1H weapon will be HIGGS grabbed unless trigger is held
+   // ANY 1H weapon will be HIGGS grabbed unless trigger is held
         // This applies to: single weapon, dual-wield, and shield+weapon
     // EXCLUDED: 2H weapons, bows, staffs, bound weapons (handled by IsWeapon check above)
    // ============================================
@@ -703,37 +903,114 @@ default:
    return;
 
         WeaponType type = GetWeaponType(item);
-        const char* typeName = GetWeaponTypeName(type);
+  const char* typeName = GetWeaponTypeName(type);
         const char* handName = isLeftHand ? "Left" : "Right";
 
-     EquippedWeapon& hand = isLeftHand ? m_equipState.leftHand : m_equipState.rightHand;
+   EquippedWeapon& hand = isLeftHand ? m_equipState.leftHand : m_equipState.rightHand;
     hand.Clear();
 
    _MESSAGE("EquipManager: UNEQUIPPED %s from %s hand (FormID: %08X)", typeName, handName, item->formID);
-        
+     
         // Record unequip time for draw sound cooldown
-        // Only track weapons (not shields)
-        if (type != WeaponType::Shield && type != WeaponType::None)
+      // Only track weapons (not shields)
+   if (type != WeaponType::Shield && type != WeaponType::None)
         {
     std::lock_guard<std::mutex> lock(s_drawMutex);
       s_lastUnequipTimes[item->formID] = std::chrono::steady_clock::now();
    _MESSAGE("EquipManager: Recorded unequip time for weapon %08X (5s draw sound cooldown started)", item->formID);
         }
         
-        if (m_equipState.HasOneWeaponEquipped())
+        // ============================================
+        // PLAYER SHEATH SOUNDS
+ // ============================================
+     // Cache sheath sound FormIDs from Fake Edge VR.esp (ESL-flagged)
+        // Base FormIDs: Dagger=0x80A, Sword=0x80B, Axe=0x80C, Mace=0x80D
+     static UInt32 cachedDaggerSheathSound = 0;
+        static UInt32 cachedSwordSheathSound = 0;
+        static UInt32 cachedAxeSheathSound = 0;
+        static UInt32 cachedMaceSheathSound = 0;
+        static bool sheathSoundsCached = false;
+        
+        if (!sheathSoundsCached)
+     {
+    cachedDaggerSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80A);
+       cachedSwordSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80B);
+            cachedAxeSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80C);
+            cachedMaceSheathSound = GetFullFormIdFromEspAndFormId("Fake Edge VR.esp", 0x80D);
+            sheathSoundsCached = true;
+   _MESSAGE("EquipManager: Cached player sheath sounds - Dagger:%08X, Sword:%08X, Axe:%08X, Mace:%08X",
+          cachedDaggerSheathSound, cachedSwordSheathSound, cachedAxeSheathSound, cachedMaceSheathSound);
+     }
+        
+        // Check if this weapon should be excluded from sounds
+        bool shouldExclude = IsExcludedItem(item->formID);
+        
+  // Check sheath sound cooldown (5 seconds from last equip of same weapon)
+ bool onSheathCooldown = false;
+  {
+std::lock_guard<std::mutex> lock(s_sheathMutex);
+        auto it = s_lastEquipTimes.find(item->formID);
+   if (it != s_lastEquipTimes.end())
         {
+    auto now = std::chrono::steady_clock::now();
+                auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(now - it->second).count();
+                if (elapsed < SHEATH_SOUND_COOLDOWN_SECONDS)
+      {
+      onSheathCooldown = true;
+          _MESSAGE("EquipManager: Sheath sound on cooldown for %08X (%lld/%d seconds since equip)", 
+            item->formID, elapsed, SHEATH_SOUND_COOLDOWN_SECONDS);
+                }
+            }
+        }
+        
+        switch (type)
+     {
+     case WeaponType::Dagger:
+           _MESSAGE(">>> PLAYER UNEQUIPPED: DAGGER (FormID: %08X) from %s hand", item->formID, handName);
+                if (!s_suppressSheathSound && !shouldExclude && !onSheathCooldown && cachedDaggerSheathSound != 0)
+      PlaySoundAtPlayer(cachedDaggerSheathSound);
+     break;
+            case WeaponType::Sword:
+          _MESSAGE(">>> PLAYER UNEQUIPPED: 1H SWORD (FormID: %08X) from %s hand", item->formID, handName);
+                if (!s_suppressSheathSound && !shouldExclude && !onSheathCooldown && cachedSwordSheathSound != 0)
+   PlaySoundAtPlayer(cachedSwordSheathSound);
+                break;
+case WeaponType::Mace:
+      _MESSAGE(">>> PLAYER UNEQUIPPED: 1H MACE (FormID: %08X) from %s hand", item->formID, handName);
+                if (!s_suppressSheathSound && !shouldExclude && !onSheathCooldown && cachedMaceSheathSound != 0)
+          PlaySoundAtPlayer(cachedMaceSheathSound);
+      break;
+            case WeaponType::Axe:
+    _MESSAGE(">>> PLAYER UNEQUIPPED: 1H AXE (FormID: %08X) from %s hand", item->formID, handName);
+       if (!s_suppressSheathSound && !shouldExclude && !onSheathCooldown && cachedAxeSheathSound != 0)
+         PlaySoundAtPlayer(cachedAxeSheathSound);
+   break;
+            case WeaponType::Shield:
+           _MESSAGE(">>> PLAYER UNEQUIPPED: SHIELD (FormID: %08X) from %s hand", item->formID, handName);
+     break;
+            default:
+      break;
+   }
+    
+        if (s_suppressSheathSound)
+        {
+     _MESSAGE("EquipManager: Skipping sheath sound (internal collision unequip)");
+        }
+        
+        if (m_equipState.HasOneWeaponEquipped())
+ {
             const char* remainingHand = m_equipState.leftHand.isEquipped ? "Left" : "Right";
             WeaponType remainingType = m_equipState.leftHand.isEquipped 
-        ? m_equipState.leftHand.type 
-                : m_equipState.rightHand.type;
-            
-      _MESSAGE("EquipManager: Player now has SINGLE weapon equipped - %s in %s hand", 
-       GetWeaponTypeName(remainingType), remainingHand);
-        }
+  ? m_equipState.leftHand.type 
+     : m_equipState.rightHand.type;
+
+            _MESSAGE("EquipManager: Player now has SINGLE weapon equipped - %s in %s hand", 
+    GetWeaponTypeName(remainingType), remainingHand);
+   }
    
-        LogEquipmentState();
-        
-     // Update VR input handler grab listening
+  LogEquipmentState();
+  
+        // Update VR input handler grab listening
         VRInputHandler::GetSingleton()->UpdateGrabListening();
     }
 
@@ -791,6 +1068,7 @@ default:
             case TESObjectWEAP::GameData::kType_CrossBow:
        return WeaponType::None;  // Treat as not a weapon for our purposes
             
+
             default:
    return WeaponType::None;
         }
@@ -871,10 +1149,56 @@ TESObjectARMO* armor = DYNAMIC_CAST(form, TESForm, TESObjectARMO);
         if (!armor)
    return false;
 
-        return (armor->bipedObject.GetSlotMask() & BGSBipedObjectForm::kPart_Shield) != 0;
+ return (armor->bipedObject.GetSlotMask() & BGSBipedObjectForm::kPart_Shield) != 0;
     }
 
-    // ============================================
+    bool EquipManager::IsTwoHandedWeapon(TESForm* form)
+    {
+     if (!form)
+    return false;
+        
+  if (form->formType != kFormType_Weapon)
+      return false;
+        
+ TESObjectWEAP* weapon = DYNAMIC_CAST(form, TESForm, TESObjectWEAP);
+        if (!weapon)
+  return false;
+        
+ switch (weapon->gameData.type)
+   {
+      case TESObjectWEAP::GameData::kType_TwoHandSword:
+          case TESObjectWEAP::GameData::kType_2HS:
+     case TESObjectWEAP::GameData::kType_TwoHandAxe:
+        case TESObjectWEAP::GameData::kType_2HA:
+      case TESObjectWEAP::GameData::kType_Bow:
+     case TESObjectWEAP::GameData::kType_Staff:
+         case TESObjectWEAP::GameData::kType_CrossBow:
+return true;
+   default:
+    return false;
+    }
+    }
+    
+  bool EquipManager::PlayerHasTwoHandedEquipped()
+    {
+      PlayerCharacter* player = *g_thePlayer;
+      if (!player)
+       return false;
+      
+      // Check both hands - 2H weapons typically show in right hand
+ TESForm* rightEquipped = player->GetEquippedObject(false);
+        TESForm* leftEquipped = player->GetEquippedObject(true);
+        
+    if (rightEquipped && IsTwoHandedWeapon(rightEquipped))
+         return true;
+        
+    if (leftEquipped && IsTwoHandedWeapon(leftEquipped))
+     return true;
+        
+        return false;
+    }
+
+  // ============================================
     // Forced Unequip Functions
     // ============================================
 
@@ -961,11 +1285,13 @@ TESObjectARMO* armor = DYNAMIC_CAST(form, TESForm, TESObjectARMO);
     equipList->Remove(kExtraData_CannotWear, xCannotWear);
         }
 
-        // Unequip the item (silent - no sound, no message)
+      // Unequip the item (silent - no sound, no message)
+        s_suppressSheathSound = true;
   CALL_MEMBER_FN(equipManager, UnequipItem)(player, item, equipList, 1, equipSlot, false, true, true, false, NULL);
+        s_suppressSheathSound = false;
 
     _MESSAGE("EquipManager: Force unequip command sent for %s hand (silent)", isLeftHand ? "Left" : "Right");
-    }
+}
 
     void EquipManager::ForceUnequipLeftHand()
     {
@@ -1465,7 +1791,9 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
     }
 
    // Unequip the item (silent - no sound, no message)
+        s_suppressSheathSound = true;
         CALL_MEMBER_FN(equipManager, UnequipItem)(player, item, equipList, 1, equipSlot, false, true, true, false, NULL);
+        s_suppressSheathSound = false;
 
      _MESSAGE("EquipManager: Item unequipped (silent), now creating world object for HIGGS grab...");
 
@@ -1545,10 +1873,13 @@ else
       isLeftVRController ? "Left" : "Right",
    isLeftGameHand ? "Left" : "Right");
      higgsInterface->GrabObject(droppedWeapon, isLeftVRController);
+     
+ // Track the grabbed weapon for scaling
+     TrackGrabbedWeapon(droppedWeapon, isLeftVRController);
    }
-         else
+  else
        {
-     _MESSAGE("EquipManager: HIGGS cannot grab with %s VR controller right now", 
+  _MESSAGE("EquipManager: HIGGS cannot grab with %s VR controller right now", 
        isLeftVRController ? "Left" : "Right");
     }
     }

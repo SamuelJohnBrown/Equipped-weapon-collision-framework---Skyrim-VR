@@ -51,6 +51,10 @@ namespace FalseEdgeVR {
 	// Equipment change grace period
 	int equipGraceFrames = 20;    // Frames to wait after equipment change before collision detection (~0.22 sec at 90fps)
 
+	// Grabbed weapon scaling settings
+	bool weaponScalingEnabled = true;   // Enable weapon scaling when HIGGS grabbed (default enabled)
+	float weaponGrabbedScale = 0.85f; // Scale factor for grabbed weapons (0.85 = 85% of original size)
+
 	void loadConfig() 
 	{
 		std::string runtimeDirectory = GetRuntimeDirectory();
@@ -260,6 +264,20 @@ namespace FalseEdgeVR {
 							equipGraceFrames = std::stoi(variableValueStr);
 						}
 					}
+					else if (currentSection == "WeaponScaling")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "Enabled")
+						{
+							weaponScalingEnabled = (std::stoi(variableValueStr) != 0);
+						}
+						else if (variableName == "GrabbedScale")
+						{
+							weaponGrabbedScale = std::stof(variableValueStr);
+						}
+					}
 				} 
 			}
 			_MESSAGE("Config loaded successfully.");
@@ -288,6 +306,8 @@ namespace FalseEdgeVR {
 			_MESSAGE("ShieldBash settings: Enabled=%s, BashThreshold=%d, BashWindow=%.1f, LockoutDuration=%.0f",
 				shieldBashEnabled ? "true" : "false", shieldBashThreshold, shieldBashWindow, shieldBashLockoutDuration);
 			_MESSAGE("General settings: EquipGraceFrames=%d", equipGraceFrames);
+			_MESSAGE("WeaponScaling settings: Enabled=%s, GrabbedScale=%.2f",
+				weaponScalingEnabled ? "true" : "false", weaponGrabbedScale);
 			return;
 		}
 		return;
