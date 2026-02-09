@@ -43,6 +43,27 @@ namespace FalseEdgeVR {
 	// Trigger-based weapon hold settings
 	extern float triggerUnequipDelay;           // Delay (seconds) after trigger release before unequipping weapon
 
+	// Intentional drop settings (grip spam detection)
+	extern int gripSpamThreshold;    // Number of grip releases to trigger intentional drop
+	extern float gripSpamWindow;         // Time window (seconds) for grip releases
+	extern float dropProtectionDisableTime;     // How long drop protection is disabled (seconds)
+
+	// Weapon lock settings (trigger spam detection)
+	extern int triggerSpamThreshold;            // Number of trigger presses to toggle weapon lock
+	extern float triggerSpamWindow;           // Time window (seconds) for trigger presses
+
+	// Weapon spawn offset settings (when unequipping for HIGGS grab)
+	// Non-mounted: spawn behind player so they can't see it
+	extern float spawnOffsetX;       // X offset from player (negative = behind based on facing)
+	extern float spawnOffsetY;      // Y offset from player (negative = behind based on facing)
+	extern float spawnOffsetZ;           // Z offset from player (negative = below)
+	extern float spawnDistance; // Distance behind player (units, 70 = ~1 meter)
+	
+	// Mounted: spawn elevated to avoid horse collision
+	extern float spawnOffsetMountedX;  // X offset when mounted
+	extern float spawnOffsetMountedY;       // Y offset when mounted
+	extern float spawnOffsetMountedZ;           // Z offset when mounted (positive = above)
+
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	extern int collisionAvoidanceHand;          // Which hand gets unequipped/grabbed during dual-wield collision
 
@@ -63,32 +84,18 @@ namespace FalseEdgeVR {
 	extern float shieldRadius;     // Shield face detection radius
 
 	// Shield bash settings
-	extern bool shieldBashEnabled;   // Enable/disable shield bash tracking feature
-	extern int shieldBashThreshold;              // Number of bashes required to trigger effect
-	extern float shieldBashWindow;      // Time window (seconds) to register bashes
-	extern float shieldBashLockoutDuration;      // Lockout duration (seconds) after triggering effect
+	extern bool shieldBashEnabled;
+	extern int shieldBashThreshold;
+	extern float shieldBashWindow;
+	extern float shieldBashLockoutDuration;
 
 	// Equipment change grace period
-	extern int equipGraceFrames;         // Frames to wait after equipment change before collision detection
+	extern int equipGraceFrames;
 
-	// Grabbed weapon scaling settings
-	extern bool weaponScalingEnabled;   // Enable/disable weapon scaling when HIGGS grabbed
-	extern float weaponGrabbedScale;     // Scale factor for grabbed weapons (1.0 = 100%, 0.8 = 80%)
-
+	// Load configuration from INI file
 	void loadConfig();
 	
+	// Logging
 	void Log(const int msgLogLevel, const char* fmt, ...);
-	enum eLogLevels
-	{
-		LOGLEVEL_ERR = 0,
-		LOGLEVEL_WARN,
-		LOGLEVEL_INFO,
-	};
-
-
-#define LOG(fmt, ...) Log(LOGLEVEL_WARN, fmt, ##__VA_ARGS__)
-#define LOG_ERR(fmt, ...) Log(LOGLEVEL_ERR, fmt, ##__VA_ARGS__)
-#define LOG_INFO(fmt, ...) Log(LOGLEVEL_INFO, fmt, ##__VA_ARGS__)
-
-
+	#define LOG(fmt, ...) Log(2, fmt, __VA_ARGS__)
 }

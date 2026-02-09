@@ -190,8 +190,7 @@ PlayerCharacter* player = *g_thePlayer;
 SafeActivate(droppedLeft, player, 0, 0, 1, false);
         EquipManager::s_suppressPickupSound = false;
       }
-        ClearGrabbedWeapon(GameHandToVRController(true));
-   equipMgr->ClearDroppedWeaponRef(true);
+        equipMgr->ClearDroppedWeaponRef(true);
             equipMgr->ClearPendingReequip(true);
       equipMgr->ClearCachedWeaponFormID(true);
    }
@@ -207,8 +206,7 @@ SafeActivate(droppedLeft, player, 0, 0, 1, false);
  SafeActivate(droppedRight, player, 0, 0, 1, false);
      EquipManager::s_suppressPickupSound = false;
     }
-   ClearGrabbedWeapon(GameHandToVRController(false));
- equipMgr->ClearDroppedWeaponRef(false);
+   equipMgr->ClearDroppedWeaponRef(false);
          equipMgr->ClearPendingReequip(false);
    equipMgr->ClearCachedWeaponFormID(false);
      }
@@ -1312,29 +1310,29 @@ return true;
             return;
         }
 
-        // Use correct cached FormID for each hand
-UInt32 cachedFormID = isLeftHand ? m_cachedWeaponFormIDLeft : m_cachedWeaponFormIDRight;
-      
-        if (cachedFormID == 0)
-{
-    _MESSAGE("EquipManager::ForceReequipHand - No cached weapon FormID for %s hand!", 
-       isLeftHand ? "Left" : "Right");
-     return;
-        }
+     // Use correct cached FormID for each hand
+     UInt32 cachedFormID = isLeftHand ? m_cachedWeaponFormIDLeft : m_cachedWeaponFormIDRight;
 
- TESForm* weaponForm = LookupFormByID(cachedFormID);
-   if (!weaponForm)
-        {
-   _MESSAGE("EquipManager::ForceReequipHand - Weapon form %08X not found!", cachedFormID);
-          return;
-      }
+     if (cachedFormID == 0)
+     {
+         _MESSAGE("EquipManager::ForceReequipHand - No cached weapon FormID for %s hand!",
+             isLeftHand ? "Left" : "Right");
+         return;
+     }
+
+     TESForm* weaponForm = LookupFormByID(cachedFormID);
+     if (!weaponForm)
+     {
+         _MESSAGE("EquipManager::ForceReequipHand - Weapon form %08X not found!", cachedFormID);
+         return;
+     }
 
      ::EquipManager* equipMan = ::EquipManager::GetSingleton();
- if (!equipMan)
-   {
-     _MESSAGE("EquipManager::ForceReequipHand - EquipManager not available!");
-            return;
-  }
+     if (!equipMan)
+     {
+         _MESSAGE("EquipManager::ForceReequipHand - EquipManager not available!");
+         return;
+     }
     
       // Get the appropriate slot for left or right hand
         BGSEquipSlot* slot = isLeftHand ? GetLeftHandSlot() : GetRightHandSlot();
@@ -1791,50 +1789,75 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
     }
 
    // Unequip the item (silent - no sound, no message)
-        s_suppressSheathSound = true;
-        CALL_MEMBER_FN(equipManager, UnequipItem)(player, item, equipList, 1, equipSlot, false, true, true, false, NULL);
-        s_suppressSheathSound = false;
+   s_suppressSheathSound = true;
+   CALL_MEMBER_FN(equipManager, UnequipItem)(player, item, equipList, 1, equipSlot, false, true, true, false, NULL);
+   s_suppressSheathSound = false;
 
-     _MESSAGE("EquipManager: Item unequipped (silent), now creating world object for HIGGS grab...");
+   _MESSAGE("EquipManager: Item unequipped (silent), now creating world object for HIGGS grab...");
 
-        // Step 2: Get the hand position to spawn the weapon there
-   NiNode* rootNode = player->GetNiRootNode(0);
-    if (!rootNode)
+   // Clear weapon lock for the VR controller corresponding to this game hand
+   // This prevents the controller from getting stuck in lock mode when weapon is unequipped
+   bool isLeftVRController = GameHandToVRController(isLeftGameHand);
+   VRInputHandler::ClearWeaponLock(isLeftVRController);
+   _MESSAGE("EquipManager: Cleared weapon lock for %s VR controller", isLeftVRController ? "LEFT" : "RIGHT");
+
+   // Step 2: Determine spawn position based on mount state
+
+        // Step 2: Determine spawn position based on mount state
+      // - If player is MOUNTED: spawn at hand position (to avoid horse collision)
+   // - If player is NOT mounted: spawn BEHIND player (so they can't see the weapon appear)
+      NiNode* rootNode = player->GetNiRootNode(0);
+        if (!rootNode)
         {
-  rootNode = player->GetNiRootNode(1);
-  }
-      
+            rootNode = player->GetNiRootNode(1);
+        }
+        
         NiPoint3 spawnPos = player->pos;
-    
-      if (rootNode)
+        
+        // Check if player is mounted
+      NiPointer<Actor> mountActor;
+      bool isMounted = CALL_MEMBER_FN(player, GetMount)(mountActor) && mountActor;
+        
+      if (isMounted)
       {
-            // Try to get the hand node position
-  const char* handNodeName = isLeftGameHand ? "NPC L Hand [LHnd]" : "NPC R Hand [RHnd]";
-        BSFixedString handNodeStr(handNodeName);
-      NiAVObject* handNode = rootNode->GetObjectByName(&handNodeStr.data);
-      
-    if (handNode)
-     {
-   spawnPos = handNode->m_worldTransform.pos;
-          _MESSAGE("EquipManager: Spawning weapon at GAME %s hand position (%.2f, %.2f, %.2f)", 
-    isLeftGameHand ? "Left" : "Right",
-    spawnPos.x, spawnPos.y, spawnPos.z);
-   }
-else
+          // MOUNTED: Spawn at player position with configurable mounted offsets
+          _MESSAGE("EquipManager: Player is MOUNTED - spawning weapon with mounted offsets from player");
+
+          // Simple offset from player world position (mounted settings)
+          spawnPos.x = player->pos.x + spawnOffsetMountedX;
+          spawnPos.y = player->pos.y + spawnOffsetMountedY;
+          spawnPos.z = player->pos.z + spawnOffsetMountedZ;
+
+          _MESSAGE("EquipManager: Spawning weapon at player + mounted offset (%.2f, %.2f, %.2f)",
+              spawnPos.x, spawnPos.y, spawnPos.z);
+      }
+    else
   {
-     _MESSAGE("EquipManager: Hand node not found, using player position");
-   }
- }
+          // NOT MOUNTED: Spawn at player position with configurable offsets
+          _MESSAGE("EquipManager: Player is NOT mounted - spawning weapon with offsets from player");
+
+          // Simple offset from player world position
+          spawnPos.x = player->pos.x + spawnOffsetX;
+          spawnPos.y = player->pos.y + spawnOffsetY;
+          spawnPos.z = player->pos.z + spawnOffsetZ;
+
+          _MESSAGE("EquipManager: Spawning weapon at player + offset (%.2f, %.2f, %.2f)",
+              spawnPos.x, spawnPos.y, spawnPos.z);
+        }
 
       // Step 3: Create a world object using PlaceAtMe
-     TESObjectREFR* droppedWeapon = PlaceAtMe_Native(nullptr, 0, player, item, 1, false, false);
-      
-   if (droppedWeapon)
-     {
-    _MESSAGE("EquipManager: Created world weapon reference (RefID: %08X)", droppedWeapon->formID);
+      TESObjectREFR* droppedWeapon = PlaceAtMe_Native(nullptr, 0, player, item, 1, false, false);
 
- // Step 3.25: Set ownership to player to prevent "stolen" flag when picking up
-        SetOwnerToPlayer(droppedWeapon);
+      if (droppedWeapon)
+      {
+          _MESSAGE("EquipManager: Created world weapon reference (RefID: %08X)", droppedWeapon->formID);
+
+          // Step 3.1: Move weapon to calculated spawn position
+          droppedWeapon->pos = spawnPos;
+          _MESSAGE("EquipManager: Moved weapon to spawn position (%.2f, %.2f, %.2f)", spawnPos.x, spawnPos.y, spawnPos.z);
+
+          // Step 3.25: Set ownership to player to prevent "stolen" flag when picking up
+          SetOwnerToPlayer(droppedWeapon);
 
   // Step 3.5: Remove the item from inventory to prevent duplication
   // PlaceAtMe creates a COPY, so we need to remove the original from inventory
@@ -1874,8 +1897,8 @@ else
    isLeftGameHand ? "Left" : "Right");
      higgsInterface->GrabObject(droppedWeapon, isLeftVRController);
      
- // Track the grabbed weapon for scaling
-     TrackGrabbedWeapon(droppedWeapon, isLeftVRController);
+ // REMOVED: Track the grabbed weapon for scaling
+     // TrackGrabbedWeapon(droppedWeapon, isLeftVRController);
    }
   else
        {
@@ -1973,20 +1996,28 @@ else
         }
         
   // Check if trigger is still not held
-        bool offHandIsLeft = GetCollisionAvoidanceHandIsLeft();
-        bool offHandVRControllerIsLeft = GameHandToVRController(offHandIsLeft);
+  bool offHandIsLeft = GetCollisionAvoidanceHandIsLeft();
+ bool offHandVRControllerIsLeft = GameHandToVRController(offHandIsLeft);
  bool triggerHeld = offHandVRControllerIsLeft ? 
          VRInputHandler::IsLeftTriggerPressed() : VRInputHandler::IsRightTriggerPressed();
-            
-        if (triggerHeld)
+      
+   if (triggerHeld)
         {
-            _MESSAGE("EquipManager::CheckPendingAutoUnequip - Trigger now held, keeping equipped");
+     _MESSAGE("EquipManager::CheckPendingAutoUnequip - Trigger now held, keeping equipped");
     return;
-    }
+        }
+        
+        // Check if weapon is locked (trigger spam = 4x to lock)
+        bool weaponLocked = VRInputHandler::IsWeaponLocked(offHandVRControllerIsLeft);
+        if (weaponLocked)
+   {
+    _MESSAGE("EquipManager::CheckPendingAutoUnequip - Weapon is LOCKED, keeping equipped");
+     return;
+        }
    
  // Perform the unequip and HIGGS grab
         _MESSAGE("EquipManager::CheckPendingAutoUnequip - Unequipping and HIGGS grabbing weapon");
-        ForceUnequipAndGrab(isLeftHand);
+  ForceUnequipAndGrab(isLeftHand);
     }
 
     // ============================================

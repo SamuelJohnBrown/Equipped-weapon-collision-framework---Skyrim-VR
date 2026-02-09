@@ -160,8 +160,9 @@ namespace FalseEdgeVR
 		PlaySoundEffect((*g_skyrimVM)->GetClassRegistry(), 0, sound, actor);
 	}
 
-	// Set the ownership of an object reference to the player
-	// This prevents the item from being flagged as stolen when picked up
+	// Remove ownership from an object reference
+// This prevents the item from being flagged as stolen when picked up
+// By removing ownership entirely, the item becomes "unowned" and can be freely taken
 	void SetOwnerToPlayer(TESObjectREFR* objRef)
 	{
 		if (!objRef)
@@ -170,47 +171,18 @@ namespace FalseEdgeVR
 			return;
 		}
 
-		PlayerCharacter* player = *g_thePlayer;
-		if (!player)
-		{
-			_MESSAGE("[SetOwner] ERROR: Player not available");
-			return;
-		}
-
-		// Get or create the extra data list
+		// Get the extra data list
 		BaseExtraList* extraList = &objRef->extraData;
-		
-		// Check if ownership already exists
+
+		// Remove ownership if it exists - this makes the item unowned/free to take
 		if (extraList->HasType(kExtraData_Ownership))
 		{
-			// Get existing ownership and update it
-			BSExtraData* existing = extraList->m_data;
-			while (existing)
-			{
-				if (existing->GetType() == kExtraData_Ownership)
-				{
-					ExtraOwnership* ownership = static_cast<ExtraOwnership*>(existing);
-					ownership->owner = player;
-					_MESSAGE("[SetOwner] Updated existing ownership to player (RefID: %08X)", objRef->formID);
-					return;
-				}
-				existing = existing->next;
-			}
-		}
-		
-		// Create new ExtraOwnership
-		// We use BSExtraData::Create with the vtable for ExtraOwnership
-		static RelocPtr<uintptr_t> s_ExtraOwnershipVtbl(0x015A32D0);
-		ExtraOwnership* xOwnership = (ExtraOwnership*)BSExtraData::Create(sizeof(ExtraOwnership), s_ExtraOwnershipVtbl.GetUIntPtr());
-		if (xOwnership)
-		{
-			xOwnership->owner = player;
-			extraList->Add(kExtraData_Ownership, xOwnership);
-			_MESSAGE("[SetOwner] Set ownership to player for RefID: %08X", objRef->formID);
+			extraList->Remove(kExtraData_Ownership, extraList->GetByType(kExtraData_Ownership));
+			_MESSAGE("[SetOwner] Removed ownership from RefID: %08X (now unowned)", objRef->formID);
 		}
 		else
 		{
-			_MESSAGE("[SetOwner] ERROR: Failed to create ExtraOwnership");
+			_MESSAGE("[SetOwner] No ownership to remove for RefID: %08X (already unowned)", objRef->formID);
 		}
 	}
 
@@ -518,156 +490,6 @@ namespace FalseEdgeVR
 		bool isBlocking = false;
 		get_vfunc<_IAnimationGraphManagerHolder_GetAnimationVariableBool>(&player->animGraphHolder, 0x12)(&player->animGraphHolder, s_IsBlocking, isBlocking);
 		return isBlocking;
-	}
-
-	// ============================================
-	// Weapon Scaling (HIGGS grabbed weapons)
-	// ============================================
-	
-	// Track grabbed weapons for each VR controller hand
-	static TESObjectREFR* g_grabbedWeaponLeft = nullptr;
-	static TESObjectREFR* g_grabbedWeaponRight = nullptr;
-	
-	// Helper to check if a reference is still valid
-	static bool IsRefrValid(TESObjectREFR* refr)
-	{
-		if (!refr)
-			return false;
-		
-		// Check formType and formID to see if the reference is valid
-		__try {
-			return (refr->formType == kFormType_Reference && refr->formID != 0);
-		}
-		__except(EXCEPTION_EXECUTE_HANDLER) {
-			return false;
-		}
-	}
-	
-	void ScaleWorldObject(TESObjectREFR* refr, float targetScale)
-	{
-		if (!refr)
-			return;
-			
-		if (!IsRefrValid(refr))
-			return;
-		
-		// Get the 3D root node for the reference
-		NiNode* rootNode = refr->GetNiNode();
-		if (!rootNode)
-		{
-			return;
-		}
-		
-		// Set the scale on the root node's local transform
-		rootNode->m_localTransform.scale = targetScale;
-		
-		// Also set world transform scale
-		rootNode->m_worldTransform.scale = targetScale;
-		
-		// Recursively set scale on all child nodes as well
-		for (UInt32 i = 0; i < rootNode->m_children.m_size; ++i)
-		{
-			NiAVObject* child = rootNode->m_children.m_data[i];
-			if (child)
-			{
-				child->m_localTransform.scale = targetScale;
-				child->m_worldTransform.scale = targetScale;
-			}
-		}
-		
-		// Force update of world transforms
-		NiAVObject::ControllerUpdateContext ctx;
-		ctx.flags = 0;
-		ctx.delta = 0;
-		rootNode->UpdateWorldData(&ctx);
-	}
-	
-	void TrackGrabbedWeapon(TESObjectREFR* weaponRefr, bool isLeftVRController)
-	{
-		if (!weaponRefr)
-			return;
-			
-		if (isLeftVRController)
-		{
-			g_grabbedWeaponLeft = weaponRefr;
-			_MESSAGE("Engine: Tracking grabbed weapon in LEFT VR controller (RefID: %08X)", weaponRefr->formID);
-		}
-		else
-		{
-			g_grabbedWeaponRight = weaponRefr;
-			_MESSAGE("Engine: Tracking grabbed weapon in RIGHT VR controller (RefID: %08X)", weaponRefr->formID);
-		}
-		
-		// Apply initial scale if scaling is enabled
-		if (weaponScalingEnabled && weaponGrabbedScale != 1.0f)
-		{
-			ScaleWorldObject(weaponRefr, weaponGrabbedScale);
-			_MESSAGE("Engine: Applied initial scale %.2f to grabbed weapon", weaponGrabbedScale);
-		}
-	}
-	
-	void ClearGrabbedWeapon(bool isLeftVRController)
-	{
-		TESObjectREFR* weaponRefr = isLeftVRController ? g_grabbedWeaponLeft : g_grabbedWeaponRight;
-		
-		// Restore scale to 1.0 when dropped (if the reference is still valid)
-		if (weaponRefr && IsRefrValid(weaponRefr))
-		{
-			ScaleWorldObject(weaponRefr, 1.0f);
-			_MESSAGE("Engine: Restored scale to 1.0 for dropped weapon (RefID: %08X)", weaponRefr->formID);
-		}
-		
-		if (isLeftVRController)
-		{
-			g_grabbedWeaponLeft = nullptr;
-			_MESSAGE("Engine: Cleared grabbed weapon tracking for LEFT VR controller");
-		}
-		else
-		{
-			g_grabbedWeaponRight = nullptr;
-			_MESSAGE("Engine: Cleared grabbed weapon tracking for RIGHT VR controller");
-		}
-	}
-	
-	void UpdateGrabbedWeaponScales()
-	{
-		// Skip if scaling is disabled
-		if (!weaponScalingEnabled)
-			return;
-			
-		// Validate and apply scale to grabbed weapons continuously
-		// This ensures scale is maintained even if HIGGS or physics reset it
-		
-		if (g_grabbedWeaponLeft)
-		{
-			if (!IsRefrValid(g_grabbedWeaponLeft))
-			{
-				_MESSAGE("Engine: LEFT grabbed weapon reference is invalid, clearing");
-				g_grabbedWeaponLeft = nullptr;
-			}
-			else
-			{
-				ScaleWorldObject(g_grabbedWeaponLeft, weaponGrabbedScale);
-			}
-		}
-		
-		if (g_grabbedWeaponRight)
-		{
-			if (!IsRefrValid(g_grabbedWeaponRight))
-			{
-				_MESSAGE("Engine: RIGHT grabbed weapon reference is invalid, clearing");
-				g_grabbedWeaponRight = nullptr;
-			}
-			else
-			{
-				ScaleWorldObject(g_grabbedWeaponRight, weaponGrabbedScale);
-			}
-		}
-	}
-	
-	TESObjectREFR* GetGrabbedWeapon(bool isLeftVRController)
-	{
-		return isLeftVRController ? g_grabbedWeaponLeft : g_grabbedWeaponRight;
 	}
 
 	// ============================================

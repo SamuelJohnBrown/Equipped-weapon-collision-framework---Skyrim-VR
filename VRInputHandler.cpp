@@ -2,16 +2,144 @@
 #include "Engine.h"
 #include "WeaponGeometry.h"
 #include "ShieldCollision.h"
+#include "DaggerFlipTracker.h"
 #include "ActivateHook.h"
 #include "skse64/GameReferences.h"
-#include "skse64/GameVR.h"
-#include <chrono>
 
 namespace FalseEdgeVR
 {
     // Forward declaration for trigger polling
     void PollTriggerState();
-    
+
+    // ============================================
+    // TRIGGER-BASED WEAPON HOLD SYSTEM
+    // Off-hand weapon is HIGGS grabbed by default
+    // Trigger HELD = weapon equipped (can attack)
+    // Trigger RELEASED = weapon unequipped, HIGGS grabbed
+    // ============================================
+
+        // Track trigger state for each hand
+    static bool s_leftTriggerPressed = false;
+    static bool s_rightTriggerPressed = false;
+    static bool s_leftTriggerWasPressed = false;
+    static bool s_rightTriggerWasPressed = false;
+
+    // Trigger TOUCH state (finger on trigger but not pressing)
+    static bool s_leftTriggerTouched = false;
+    static bool s_rightTriggerTouched = false;
+    static bool s_leftTriggerWasTouched = false;
+    static bool s_rightTriggerWasTouched = false;
+
+    // Grip state
+
+    // Grip state
+    static bool s_leftGripPressed = false;
+    static bool s_rightGripPressed = false;
+    static bool s_leftGripWasPressed = false;
+    static bool s_rightGripWasPressed = false;
+
+    // ============================================
+    // Drop Protection Override (Grip Spam Detection)
+    // Configurable via INI: [IntentionalDrop] section
+    // This allows the player to intentionally drop a weapon
+    // Works regardless of whether a weapon is currently held
+    // ============================================
+
+    // Grip spam detection - LEFT VR controller
+    static int s_leftGripPressCount = 0;
+    static float s_leftGripSpamWindowTimer = 0.0f;
+    static bool s_leftDropProtectionDisabled = false;
+    static float s_leftDropProtectionDisableTimer = 0.0f;
+
+    // Grip spam detection - RIGHT VR controller
+    static int s_rightGripPressCount = 0;
+    static float s_rightGripSpamWindowTimer = 0.0f;
+    static bool s_rightDropProtectionDisabled = false;
+    static float s_rightDropProtectionDisableTimer = 0.0f;
+
+    // Grip spam thresholds - now configurable via INI (config.h):
+    // gripSpamThreshold, gripSpamWindow, dropProtectionDisableTime
+
+    // ============================================
+    // Weapon Lock (Trigger Spam Detection)
+    // If trigger is pressed 4 times within 2 seconds while holding a weapon,
+    // lock it to equipped state (won't unequip on trigger release)
+    // Press trigger 4 times again to unlock and return to normal grab behavior
+    // ============================================
+
+    // Trigger spam detection - LEFT VR controller
+    static int s_leftTriggerPressCount = 0;
+    static float s_leftTriggerSpamWindowTimer = 0.0f;
+    static bool s_leftWeaponLocked = false;  // true = weapon locked to equipped state
+
+    // Trigger spam detection - RIGHT VR controller
+    static int s_rightTriggerPressCount = 0;
+    static float s_rightTriggerSpamWindowTimer = 0.0f;
+    static bool s_rightWeaponLocked = false;  // true = weapon locked to equipped state
+
+    // Weapon lock thresholds - now configurable via INI [WeaponLock] section:
+ // triggerSpamThreshold, triggerSpamWindow (defined in config.h/config.cpp)
+
+    // ============================================
+// Hand Swap Delay
+// When empty hand grabs weapon from other hand, add delay before completing swap
+// ============================================
+    // handSwapDelay is now configurable via INI [HandSwap] section (defined in config.h/config.cpp)
+
+    // Hand swap: immediate transfer when other hand grabs weapon (no delay)
+
+    // Pending unequip state (for delayed trigger release unequip)
+    static bool s_pendingTriggerUnequip = false;
+    static float s_triggerUnequipTimer = 0.0f;
+    static bool s_pendingUnequipHand = false;  // true = left hand, false = right hand
+
+    // Trigger button mask (SteamVR trigger button = button 33)
+    static const uint64_t TRIGGER_BUTTON_MASK = (1ull << 33);
+
+    // Grip button mask (k_EButton_Grip = 2)
+    static const uint64_t GRIP_BUTTON_MASK = (1ull << 2);
+
+    // ============================================
+    // Shoulder Zone Detection
+    // Detects when controller with grabbed weapon is near shoulder
+    // Used for holstering/sheathing detection
+    // ============================================
+
+    // Shoulder zone tracking state
+    static bool s_leftControllerNearLeftShoulder = false;
+    static bool s_leftControllerNearRightShoulder = false;
+    static bool s_rightControllerNearLeftShoulder = false;
+    static bool s_rightControllerNearRightShoulder = false;
+
+    // Previous frame state for edge detection
+    static bool s_prevLeftNearLeftShoulder = false;
+    static bool s_prevLeftNearRightShoulder = false;
+    static bool s_prevRightNearLeftShoulder = false;
+    static bool s_prevRightNearRightShoulder = false;
+
+    // Shoulder zone configuration (in Skyrim units, ~70 units = 1 meter)
+    static constexpr float SHOULDER_ZONE_RADIUS = 25.0f;  // Detection radius around shoulder
+    static constexpr float SHOULDER_OFFSET_X = 17.5f;     // Left/right offset from head (matches HIGGS RightShoulderHmdOffsetX)
+    static constexpr float SHOULDER_OFFSET_Y = -5.0f;     // Forward/back offset from head (matches HIGGS RightShoulderHmdOffsetY)
+    static constexpr float SHOULDER_OFFSET_Z = -6.85f;    // Up/down offset from head (matches HIGGS RightShoulderHmdOffsetZ)
+
+    // Node names for VR tracking
+    static const char* kHMDNodeName = "NPC Head [Head]";
+    static const char* kLeftHandNodeName = "NPC L Hand [LHnd]";
+    static const char* kRightHandNodeName = "NPC R Hand [RHnd]";
+
+    // Helper function to check if a VR controller is in ANY shoulder zone
+    bool IsControllerInShoulderZone(bool isLeftVRController)
+    {
+        if (isLeftVRController)
+        {
+            return s_leftControllerNearLeftShoulder || s_leftControllerNearRightShoulder;
+        }
+        else
+        {
+            return s_rightControllerNearLeftShoulder || s_rightControllerNearRightShoulder;
+        }
+    }
     // ============================================
     // VRInputHandler Implementation
     // ============================================
@@ -123,41 +251,56 @@ namespace FalseEdgeVR
     
     void VRInputHandler::OnPrePhysicsStep(void* world)
     {
-   static int frameCount = 0;
+      static int frameCount = 0;
         static bool loggedOnce = false;
    
         VRInputHandler* handler = GetSingleton();
+      
+        // ============================================
+ // SAFE TRACKING: Skip ALL processing when paused
+        // This prevents CTD during smithing/crafting menus
+        // ============================================
+        if (handler->m_paused)
+      {
+   // Only log occasionally to avoid spam
+        if (frameCount % 500 == 0)
+     {
+        _MESSAGE("VRInputHandler::OnPrePhysicsStep - PAUSED (frame %d), skipping all tracking", frameCount);
+   }
+            frameCount++;
+          return;
+        }
   
         // Calculate delta time
- static auto lastTime = std::chrono::high_resolution_clock::now();
-        auto currentTime = std::chrono::high_resolution_clock::now();
-        float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
-  lastTime = currentTime;
+        static auto lastTime = std::chrono::high_resolution_clock::now();
+     auto currentTime = std::chrono::high_resolution_clock::now();
+      float deltaTime = std::chrono::duration<float>(currentTime - lastTime).count();
+    lastTime = currentTime;
         
-     // Clamp delta time to reasonable values
-     if (deltaTime > 0.1f) deltaTime = 0.1f;
+      // Clamp delta time to reasonable values
+        if (deltaTime > 0.1f) deltaTime = 0.1f;
         if (deltaTime < 0.0001f) deltaTime = 0.0001f;
-      
+  
         frameCount++;
-        
-        // Log once to confirm callback is working
-        if (!loggedOnce)
+  
+      // Log once to confirm callback is working
+    if (!loggedOnce)
         {
             _MESSAGE("VRInputHandler::OnPrePhysicsStep - Callback is firing! Frame: %d", frameCount);
-         loggedOnce = true;
+loggedOnce = true;
         }
     
-        // Poll trigger button state each frame
+  // Poll trigger button state each frame
         PollTriggerState();
    
         // Check for pending auto-unequip (trigger-based weapon hold system)
         EquipManager::GetSingleton()->CheckPendingAutoUnequip();
     
-        // Log every 500 frames to confirm still running
+     // Log every 500 frames to confirm still running
         if (frameCount % 500 == 0)
-  {
-         _MESSAGE("VRInputHandler::OnPrePhysicsStep - Frame %d, IsListening: %s", 
-           frameCount, handler->IsListening() ? "YES" : "NO");
+        {
+_MESSAGE("VRInputHandler::OnPrePhysicsStep - Frame %d, IsListening: %s", 
+  frameCount, handler->IsListening() ? "YES" : "NO");
         }
    
         // Update cooldown timers (for re-equip spam prevention)
@@ -198,9 +341,11 @@ handler->m_leftHandOnCooldown = false;
         
         // Update shield bash tracking (still needed for shield bash detection)
     handler->UpdateShieldBashTracking(deltaTime);
+
   
         // Update grabbed weapon scales (keeps weapons scaled while held by HIGGS)
-        UpdateGrabbedWeaponScales();
+        // REMOVED: Weapon scaling logic removed
+        // UpdateGrabbedWeaponScales();
       
   // ALWAYS update weapon geometry and shield collision tracking
     // These trackers handle their own equipment checks internally
@@ -211,19 +356,35 @@ handler->m_leftHandOnCooldown = false;
 
     void VRInputHandler::PauseTracking(bool pause)
     {
-    // Menu pause tracking removed - trackers now run continuously
-      // This function is kept for compatibility but does nothing
-        if (pause)
+    m_paused = pause;
+      
+     if (pause)
         {
-            _MESSAGE("VRInputHandler: Menu opened (tracking continues)");
-      }
+     _MESSAGE("VRInputHandler: === TRACKING PAUSED === (menu opened)");
+     
+      // Clear any pending state that could cause issues when resuming
+            m_autoEquipPendingLeft = false;
+            m_autoEquipPendingRight = false;
+          m_autoEquipTimerLeft = 0.0f;
+     m_autoEquipTimerRight = 0.0f;
+      m_autoEquipWeaponLeft = nullptr;
+            m_autoEquipWeaponRight = nullptr;
+            m_autoEquipFormIDLeft = 0;
+     m_autoEquipFormIDRight = 0;
+            
+ // Clear collision tracking state
+          m_higgsCollisionActive = false;
+            m_wasHiggsCollisionActive = false;
+  m_shieldCollisionActive = false;
+            m_wasShieldCollisionActive = false;
+        }
         else
-     {
-     _MESSAGE("VRInputHandler: Menu closed");
-       // Force equipment state refresh when menu closes
- EquipManager::GetSingleton()->UpdateEquipmentState();
+        {
+            _MESSAGE("VRInputHandler: === TRACKING RESUMED === (menu closed)");
+            // Force equipment state refresh when menu closes
+            EquipManager::GetSingleton()->UpdateEquipmentState();
             UpdateGrabListening();
-  }
+ }
     }
 
     void VRInputHandler::UpdateCombatTracking()
@@ -664,7 +825,13 @@ if (shieldDropped && higgsInterface)
     {
         VRInputHandler* handler = GetSingleton();
 
-     // Convert VR controller to game hand
+        // Check for dagger flip (throw and catch)
+        DaggerFlipTracker::GetSingleton()->OnGrabbed(isLeftVRController, grabbedRefr);
+        // Skip if tracking is paused (menu open)
+        if (handler->m_paused)
+            return;
+
+        // Convert VR controller to game hand
         bool isLeftGameHand = VRControllerToGameHand(isLeftVRController);
 
      const char* vrControllerName = isLeftVRController ? "Left" : "Right";
@@ -744,7 +911,7 @@ if (EquipManager::PlayerHasTwoHandedEquipped())
          // ============================================
      // AUTO-EQUIP GRABBED 1H WEAPON
  // This will trigger OnEquip which will then HIGGS grab it
-      // (unless trigger is held) - registering it with our trigger system
+       // (unless trigger is held) - registering it with our trigger system
        // ============================================
     _MESSAGE("VRInputHandler: Grabbed valid 1H weapon - auto-equipping to register with trigger system");
        _MESSAGE("VRInputHandler: Auto-equipping to %s VR hand (game %s hand)", 
@@ -759,19 +926,16 @@ vrControllerName, gameHandName);
             bool otherGameHandIsLeft = !isLeftGameHand;
      TESObjectREFR* otherHandDroppedWeapon = EquipManager::GetSingleton()->GetDroppedWeaponRef(otherGameHandIsLeft);
             
-      if (otherHandDroppedWeapon == grabbedRefr)
-    {
-        _MESSAGE("VRInputHandler: Weapon was grabbed from OTHER hand - clearing other hand's tracking data");
-       _MESSAGE("VRInputHandler:   Clearing %s VR controller (game %s hand) tracking", 
-    otherHandIsLeft ? "Left" : "Right", otherGameHandIsLeft ? "Left" : "Right");
-     
-         // Clear the other hand's grabbed weapon scaling
-        ClearGrabbedWeapon(otherHandIsLeft);
-    
+     if (otherHandDroppedWeapon == grabbedRefr)
+     {
+         _MESSAGE("VRInputHandler: Weapon was grabbed from OTHER hand - clearing other hand's tracking data");
+         _MESSAGE("VRInputHandler:   Clearing %s VR controller (game %s hand) tracking",
+             otherHandIsLeft ? "Left" : "Right", otherGameHandIsLeft ? "Left" : "Right");
+
          // Clear the other hand's EquipManager tracking
          EquipManager::GetSingleton()->ClearDroppedWeaponRef(otherGameHandIsLeft);
-EquipManager::GetSingleton()->ClearPendingReequip(otherGameHandIsLeft);
-    EquipManager::GetSingleton()->ClearCachedWeaponFormID(otherGameHandIsLeft);
+         EquipManager::GetSingleton()->ClearPendingReequip(otherGameHandIsLeft);
+         EquipManager::GetSingleton()->ClearCachedWeaponFormID(otherGameHandIsLeft);
      }
       
   // Activate (pick up) the grabbed weapon - add to inventory
@@ -813,21 +977,116 @@ handler->m_autoEquipTimerLeft = 0.0f;
 
     void VRInputHandler::OnDropped(bool isLeftVRController, TESObjectREFR* droppedRefr)
     {
-   if (!droppedRefr)
+        // Skip if tracking is paused (menu open)
+        if (GetSingleton()->m_paused)
             return;
 
-    // Convert VR controller to game hand
+        if (!droppedRefr)
+            return;
+
+        // Convert VR controller to game hand
         bool isLeftGameHand = VRControllerToGameHand(isLeftVRController);
+        
+        const char* vrControllerName = isLeftVRController ? "Left" : "Right";
+        const char* gameHandName = isLeftGameHand ? "Left" : "Right";
+        
+        _MESSAGE("VRInputHandler: DROP event - %s VR controller (game %s hand) dropped object (FormID: %08X)",
+            vrControllerName,
+            gameHandName,
+            droppedRefr->formID);
 
-  _MESSAGE("VRInputHandler: DROP event - %s VR controller (game %s hand) dropped object (FormID: %08X)", 
-            isLeftVRController ? "Left" : "Right",
-            isLeftGameHand ? "Left" : "Right",
-        droppedRefr->formID);
+        // Track dagger drops for flip detection
+        DaggerFlipTracker::GetSingleton()->OnDropped(isLeftVRController, droppedRefr);
 
- VRInputHandler* handler = GetSingleton();
+        VRInputHandler* handler = GetSingleton();
+
+        // ============================================
+        // COUNT DROPS FOR GRIP SPAM DETECTION
+        // Each drop event counts as a "grip release" for spam detection
+        // ============================================
+        if (isLeftVRController)
+        {
+            s_leftGripPressCount++;
+            if (s_leftGripPressCount == 1)
+            {
+                s_leftGripSpamWindowTimer = 0.0f;
+            }
+            _MESSAGE("VRInputHandler: LEFT drop count: %d/%d (window: %.2fs)",
+                s_leftGripPressCount, gripSpamThreshold, s_leftGripSpamWindowTimer);
+
+            if (s_leftGripPressCount >= gripSpamThreshold && s_leftGripSpamWindowTimer <= gripSpamWindow)
+            {
+                s_leftDropProtectionDisabled = true;
+                s_leftDropProtectionDisableTimer = dropProtectionDisableTime;
+                s_leftGripPressCount = 0;
+                s_leftGripSpamWindowTimer = 0.0f;
+                _MESSAGE("VRInputHandler: === LEFT DROP PROTECTION DISABLED FOR %.1f SECONDS ===", dropProtectionDisableTime);
+            }
+        }
+        else
+        {
+            s_rightGripPressCount++;
+            if (s_rightGripPressCount == 1)
+            {
+                s_rightGripSpamWindowTimer = 0.0f;
+            }
+            _MESSAGE("VRInputHandler: RIGHT drop count: %d/%d (window: %.2fs)",
+                s_rightGripPressCount, gripSpamThreshold, s_rightGripSpamWindowTimer);
+
+            if (s_rightGripPressCount >= gripSpamThreshold && s_rightGripSpamWindowTimer <= gripSpamWindow)
+            {
+                s_rightDropProtectionDisabled = true;
+                s_rightDropProtectionDisableTimer = dropProtectionDisableTime;
+                s_rightGripPressCount = 0;
+                s_rightGripSpamWindowTimer = 0.0f;
+                _MESSAGE("VRInputHandler: === RIGHT DROP PROTECTION DISABLED FOR %.1f SECONDS ===", dropProtectionDisableTime);
+            }
+        }
+
+        // ============================================
+ // CHECK IF DROP PROTECTION IS DISABLED (INTENTIONAL DROP)
+ // If player spammed grip, they want to drop - clear all tracking and don't re-grab
+ // ============================================
+        if (IsDropProtectionDisabled(isLeftVRController))
+        {
+            _MESSAGE("VRInputHandler: === INTENTIONAL DROP (protection disabled) ===");
+            _MESSAGE("VRInputHandler:   Clearing all tracking for %s VR controller", vrControllerName);
+
+           
+
+            // Clear auto-equip tracking
+  if (isLeftVRController)
+   {
+ handler->m_autoEquipPendingLeft = false;
+ handler->m_autoEquipTimerLeft = 0.0f;
+        handler->m_autoEquipWeaponLeft = nullptr;
+        handler->m_autoEquipFormIDLeft = 0;
+      }
+     else
+  {
+  handler->m_autoEquipPendingRight = false;
+    handler->m_autoEquipTimerRight = 0.0f;
+ handler->m_autoEquipWeaponRight = nullptr;
+ handler->m_autoEquipFormIDRight = 0;
+        }
+            
+ // Clear grabbed weapon tracking (restores weapon scale)
+     // REMOVED: ClearGrabbedWeapon(isLeftVRController);
+     
+    // Clear weapon lock state
+       ClearWeaponLock(isLeftVRController);
+      
+    // Clear EquipManager dropped weapon tracking
+  EquipManager::GetSingleton()->ClearDroppedWeaponRef(isLeftGameHand);
+       EquipManager::GetSingleton()->ClearPendingReequip(isLeftGameHand);
+        EquipManager::GetSingleton()->ClearCachedWeaponFormID(isLeftGameHand);
+    
+        _MESSAGE("VRInputHandler: Weapon will NOT be re-grabbed - player intentionally dropped it");
+  return;  // Exit early - don't do any re-grab logic
+        }
         
         // ============================================
- // Determine DROP REASON for logging/tracking
+        // Determine DROP REASON for logging/tracking
         // ============================================
         bool isAutoEquipWeapon = false;
         bool isCollisionAvoidanceWeapon = false;
@@ -966,17 +1225,12 @@ NiPoint3 handPos = handNode->m_worldTransform.pos;
             {
           handler->m_higgsCollisionActive = false;
            handler->m_wasHiggsCollisionActive = false;
-      handler->m_timeSinceLastCollision = 0.0f;
-         handler->m_pendingReequip = false;
-handler->m_pendingReequipTimer = 0.0f;
+      handler->m_shieldCollisionActive = false;
             }
          else
   {
           handler->m_shieldCollisionActive = false;
        handler->m_wasShieldCollisionActive = false;
-          handler->m_timeSinceLastShieldCollision = 0.0f;
-      handler->m_pendingReequipRight = false;
-  handler->m_pendingReequipRightTimer = 0.0f;
   }
          
  _MESSAGE("VRInputHandler: Cleared all tracking state for game %s hand - weapon was dropped", 
@@ -1137,7 +1391,7 @@ VRInputHandler* handler = GetSingleton();
     {
      _MESSAGE("VRInputHandler: TRIGGER HELD - forcing immediate re-equip of grabbed weapon (Left=%s, Right=%s)",
     leftTrig ? "YES" : "NO", rightTrig ? "YES" : "NO");
-            
+       
     // Check if this was a dual-wield same weapon situation
  bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(offHandIsLeft);
 
@@ -1323,11 +1577,11 @@ m_timeSinceLastCollision, bladeCollisionTimeout);
     // Also clear PendingReequip so CheckCollisionTimeout doesn't clear cached FormID
         EquipManager::GetSingleton()->ClearPendingReequip(offHandIsLeft);
    
-     m_pendingReequip = true;
-  m_pendingReequipIsLeft = offHandIsLeft;
- m_pendingReequipTimer = 0.0f;
+         m_pendingReequip = true;
+          m_pendingReequipIsLeft = offHandIsLeft;
+          m_pendingReequipTimer = 0.0f;
   _MESSAGE("VRInputHandler: Scheduled re-equip for %s hand in %.1f ms", 
-      offHandIsLeft ? "left" : "right", reequipDelay * 1000.0f);
+      offHandIsLeft ? "left" : "right", shieldReequipDelay *  1000.0f);
 }
         }
     }
@@ -1661,7 +1915,7 @@ isLeftGameHand ? "LEFT" : "RIGHT");
          if (!loggedResetRight)
       {
          _MESSAGE("VRInputHandler: Auto-equip timer reset (RIGHT) - grabbed weapon near equipped (dist: %.2f < %.2f)",
-      bladeDistance, bladeImminentThreshold);
+         bladeDistance, bladeImminentThreshold);
       loggedResetRight = true;
           }
          }
@@ -1797,7 +2051,7 @@ isLeftGameHand ? "LEFT" : "RIGHT");
         // Get the equipped weapon geometry from the OTHER hand
         WeaponGeometryTracker* tracker = WeaponGeometryTracker::GetSingleton();
         if (!tracker)
-     return 9999.0f;
+    return 9999.0f;
         
         // If left VR controller is grabbing, check against RIGHT hand equipped weapon
         // (Remember: left VR controller = left game hand in standard mode)
@@ -1943,7 +2197,7 @@ static TESObjectREFR* lastDroppedWeaponShield = nullptr;
         m_timeSinceLastShieldCollision = 0.0f;
          m_shieldCollisionActive = true;
     }
-        else
+    else
     {
 m_timeSinceLastShieldCollision += deltaTime;
       
@@ -2044,7 +2298,7 @@ float VRInputHandler::GetCurrentWeaponShieldDistance() const
        float dx = weaponPos.x - shieldPos.x;
          float dy = weaponPos.y - shieldPos.y;
      float dz = weaponPos.z - shieldPos.z;
-          return sqrt(dx*dx + dy*dy + dz*dz);
+        return sqrt(dx*dx + dy*dy + dz*dz);
     }
    }
             }
@@ -2105,20 +2359,34 @@ float VRInputHandler::GetCurrentWeaponShieldDistance() const
         m_rightHandCooldownTimer = 0.0f;
     m_leftHandOnCooldown = false;
      m_rightHandOnCooldown = false;
-        
+ 
         m_autoEquipPendingLeft = false;
         m_autoEquipPendingRight = false;
-        m_autoEquipTimerLeft = 0.0f;
-m_autoEquipTimerRight = 0.0f;
+     m_autoEquipTimerLeft = 0.0f;
+        m_autoEquipTimerRight = 0.0f;
    m_autoEquipWeaponLeft = nullptr;
-        m_autoEquipWeaponRight = nullptr;
+     m_autoEquipWeaponRight = nullptr;
         
-        // Clear combat tracking
+        // Clear weapon lock state
+     ClearWeaponLock(true);   // Left VR controller
+     ClearWeaponLock(false);  // Right VR controller
+        
+  // Clear drop protection override state
+        s_leftDropProtectionDisabled = false;
+        s_leftDropProtectionDisableTimer = 0.0f;
+   s_rightDropProtectionDisabled = false;
+        s_rightDropProtectionDisableTimer = 0.0f;
+      
+   // Clear pending trigger unequip
+  s_pendingTriggerUnequip = false;
+      s_triggerUnequipTimer = 0.0f;
+        
+    // Clear combat tracking
         m_isInCombat = false;
-      m_closestTargetDistance = 9999.0f;
-        m_closestTargetHandle = 0;
+   m_closestTargetDistance = 9999.0f;
+      m_closestTargetHandle = 0;
         m_closeCombatMode = false;
-        m_combatLogTimer = 0.0f;
+  m_combatLogTimer = 0.0f;
    
         // Clear shield bash tracking completely on death/load
         m_shieldBashCount = 0;
@@ -2127,8 +2395,8 @@ m_autoEquipTimerRight = 0.0f;
     m_shieldBashLockoutTimer = 0.0f;
     
       // Clear grabbed weapon scaling (restores scale to 1.0 if still valid)
-        ClearGrabbedWeapon(true);
- ClearGrabbedWeapon(false);
+        // REMOVED: ClearGrabbedWeapon(true);
+ // REMOVED: ClearGrabbedWeapon(false);
         
     EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
  EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
@@ -2165,299 +2433,888 @@ return 0.0f;
  {
         VRInputHandler::GetSingleton()->Initialize();
  }
+    // ============================================
+// Shoulder Zone Detection
+// ============================================
 
-    // ============================================
-    // TRIGGER-BASED WEAPON HOLD SYSTEM
-    // Off-hand weapon is HIGGS grabbed by default
-    // Trigger HELD = weapon equipped (can attack)
-    // Trigger RELEASED = weapon unequipped, HIGGS grabbed
-    // ============================================
-    
-    // Track trigger state for each hand
-    static bool s_leftTriggerPressed = false;
-    static bool s_rightTriggerPressed = false;
-    static bool s_leftTriggerWasPressed = false;
-    static bool s_rightTriggerWasPressed = false;
-    
-    // Pending trigger unequip (delayed unequip on trigger release)
-    static bool s_pendingTriggerUnequip = false;
-    static float s_triggerUnequipTimer = 0.0f;
-    static bool s_pendingUnequipHand = false;  // true = left hand, false = right hand
-    
-    // Trigger button mask (SteamVR trigger button = button 33)
-    static const uint64_t TRIGGER_BUTTON_MASK = (1ull << 33);
+    void CheckShoulderZones()
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return;
+
+        NiNode* rootNode = player->GetNiNode();
+        if (!rootNode)
+            rootNode = player->GetNiRootNode(1);
+        if (!rootNode)
+            return;
+
+        // Get HMD (head) node
+        BSFixedString hmdNodeStr(kHMDNodeName);
+        NiAVObject* hmdNode = rootNode->GetObjectByName(&hmdNodeStr.data);
+        if (!hmdNode)
+            return;
+
+        NiPoint3 hmdPos = hmdNode->m_worldTransform.pos;
+        NiMatrix33& hmdRot = hmdNode->m_worldTransform.rot;
+
+        // Calculate shoulder positions in world space using HMD rotation
+        // Left shoulder: negative X offset (left of head)
+        NiPoint3 leftShoulderLocal(-SHOULDER_OFFSET_X, SHOULDER_OFFSET_Y, SHOULDER_OFFSET_Z);
+        NiPoint3 leftShoulderWorld;
+        leftShoulderWorld.x = hmdPos.x + hmdRot.data[0][0] * leftShoulderLocal.x + hmdRot.data[0][1] * leftShoulderLocal.y + hmdRot.data[0][2] * leftShoulderLocal.z;
+        leftShoulderWorld.y = hmdPos.y + hmdRot.data[1][0] * leftShoulderLocal.x + hmdRot.data[1][1] * leftShoulderLocal.y + hmdRot.data[1][2] * leftShoulderLocal.z;
+        leftShoulderWorld.z = hmdPos.z + hmdRot.data[2][0] * leftShoulderLocal.x + hmdRot.data[2][1] * leftShoulderLocal.y + hmdRot.data[2][2] * leftShoulderLocal.z;
+
+        // Right shoulder: positive X offset (right of head)
+        NiPoint3 rightShoulderLocal(SHOULDER_OFFSET_X, SHOULDER_OFFSET_Y, SHOULDER_OFFSET_Z);
+        NiPoint3 rightShoulderWorld;
+        rightShoulderWorld.x = hmdPos.x + hmdRot.data[0][0] * rightShoulderLocal.x + hmdRot.data[0][1] * rightShoulderLocal.y + hmdRot.data[0][2] * rightShoulderLocal.z;
+        rightShoulderWorld.y = hmdPos.y + hmdRot.data[1][0] * rightShoulderLocal.x + hmdRot.data[1][1] * rightShoulderLocal.y + hmdRot.data[1][2] * rightShoulderLocal.z;
+        rightShoulderWorld.z = hmdPos.z + hmdRot.data[2][0] * rightShoulderLocal.x + hmdRot.data[2][1] * rightShoulderLocal.y + hmdRot.data[2][2] * rightShoulderLocal.z;
+
+        // Get hand nodes
+        BSFixedString leftHandStr(kLeftHandNodeName);
+        BSFixedString rightHandStr(kRightHandNodeName);
+        NiAVObject* leftHandNode = rootNode->GetObjectByName(&leftHandStr.data);
+        NiAVObject* rightHandNode = rootNode->GetObjectByName(&rightHandStr.data);
+
+        // Store previous state
+        s_prevLeftNearLeftShoulder = s_leftControllerNearLeftShoulder;
+        s_prevLeftNearRightShoulder = s_leftControllerNearRightShoulder;
+        s_prevRightNearLeftShoulder = s_rightControllerNearLeftShoulder;
+        s_prevRightNearRightShoulder = s_rightControllerNearRightShoulder;
+
+        // Check left controller distances
+        if (leftHandNode)
+        {
+            NiPoint3 leftHandPos = leftHandNode->m_worldTransform.pos;
+
+            float distToLeftShoulder = sqrt(
+                (leftHandPos.x - leftShoulderWorld.x) * (leftHandPos.x - leftShoulderWorld.x) +
+                (leftHandPos.y - leftShoulderWorld.y) * (leftHandPos.y - leftShoulderWorld.y) +
+                (leftHandPos.z - leftShoulderWorld.z) * (leftHandPos.z - leftShoulderWorld.z));
+
+            float distToRightShoulder = sqrt(
+                (leftHandPos.x - rightShoulderWorld.x) * (leftHandPos.x - rightShoulderWorld.x) +
+                (leftHandPos.y - rightShoulderWorld.y) * (leftHandPos.y - rightShoulderWorld.y) +
+                (leftHandPos.z - rightShoulderWorld.z) * (leftHandPos.z - rightShoulderWorld.z));
+
+            s_leftControllerNearLeftShoulder = (distToLeftShoulder <= SHOULDER_ZONE_RADIUS);
+            s_leftControllerNearRightShoulder = (distToRightShoulder <= SHOULDER_ZONE_RADIUS);
+
+            // Log enter/exit events for left controller
+            if (s_leftControllerNearLeftShoulder && !s_prevLeftNearLeftShoulder)
+            {
+                _MESSAGE("VRInputHandler: LEFT controller ENTERED LEFT SHOULDER zone (dist: %.1f)", distToLeftShoulder);
+            }
+            else if (!s_leftControllerNearLeftShoulder && s_prevLeftNearLeftShoulder)
+            {
+                _MESSAGE("VRInputHandler: LEFT controller EXITED LEFT SHOULDER zone");
+            }
+
+            if (s_leftControllerNearRightShoulder && !s_prevLeftNearRightShoulder)
+            {
+                _MESSAGE("VRInputHandler: LEFT controller ENTERED RIGHT SHOULDER zone (dist: %.1f)", distToRightShoulder);
+            }
+            else if (!s_leftControllerNearRightShoulder && s_prevLeftNearRightShoulder)
+            {
+                _MESSAGE("VRInputHandler: LEFT controller EXITED RIGHT SHOULDER zone");
+            }
+        }
+
+        // Check right controller distances
+        if (rightHandNode)
+        {
+            NiPoint3 rightHandPos = rightHandNode->m_worldTransform.pos;
+
+            float distToLeftShoulder = sqrt(
+                (rightHandPos.x - leftShoulderWorld.x) * (rightHandPos.x - leftShoulderWorld.x) +
+                (rightHandPos.y - leftShoulderWorld.y) * (rightHandPos.y - leftShoulderWorld.y) +
+                (rightHandPos.z - leftShoulderWorld.z) * (rightHandPos.z - leftShoulderWorld.z));
+
+            float distToRightShoulder = sqrt(
+                (rightHandPos.x - rightShoulderWorld.x) * (rightHandPos.x - rightShoulderWorld.x) +
+                (rightHandPos.y - rightShoulderWorld.y) * (rightHandPos.y - rightShoulderWorld.y) +
+                (rightHandPos.z - rightShoulderWorld.z) * (rightHandPos.z - rightShoulderWorld.z));
+
+            s_rightControllerNearLeftShoulder = (distToLeftShoulder <= SHOULDER_ZONE_RADIUS);
+            s_rightControllerNearRightShoulder = (distToRightShoulder <= SHOULDER_ZONE_RADIUS);
+
+            // Log enter/exit events for right controller
+            if (s_rightControllerNearLeftShoulder && !s_prevRightNearLeftShoulder)
+            {
+                _MESSAGE("VRInputHandler: RIGHT controller ENTERED LEFT SHOULDER zone (dist: %.1f)", distToLeftShoulder);
+            }
+            else if (!s_rightControllerNearLeftShoulder && s_prevRightNearLeftShoulder)
+            {
+                _MESSAGE("VRInputHandler: RIGHT controller EXITED LEFT SHOULDER zone");
+            }
+
+            if (s_rightControllerNearRightShoulder && !s_prevRightNearRightShoulder)
+            {
+                _MESSAGE("VRInputHandler: RIGHT controller ENTERED RIGHT SHOULDER zone (dist: %.1f)", distToRightShoulder);
+         }
+    else if (!s_rightControllerNearRightShoulder && s_prevRightNearRightShoulder)
+       {
+    _MESSAGE("VRInputHandler: RIGHT controller EXITED RIGHT SHOULDER zone");
+   }
+        }
+ 
+        // ============================================
+  // CHECK GRIP + SHOULDER + GRABBED WEAPON
+        // Log when grip is pressed while controller with grabbed weapon is in shoulder zone
+   // ============================================
+
+        
+        // Check LEFT controller: in shoulder zone + has grabbed weapon + grip pressed
+        if (IsControllerInShoulderZone(true) && s_leftGripPressed && higgsInterface)
+  {
+   TESObjectREFR* leftGrabbed = higgsInterface->GetGrabbedObject(true);
+if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == kFormType_Weapon)
+          {
+        // Only log on grip press (edge detection)
+                if (!s_leftGripWasPressed)
+    {
+         const char* shoulderSide = s_leftControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+        _MESSAGE("VRInputHandler: === HOLSTER GESTURE DETECTED ===");
+  _MESSAGE("VRInputHandler: LEFT controller + GRIP pressed + grabbed weapon in %s SHOULDER zone", shoulderSide);
+      _MESSAGE("VRInputHandler:   Weapon FormID: %08X", leftGrabbed->baseForm->formID);
+           }
+   }
+        }
+        
+        // Check RIGHT controller: in shoulder zone + has grabbed weapon + grip pressed
+        if (IsControllerInShoulderZone(false) && s_rightGripPressed && higgsInterface)
+        {
+            TESObjectREFR* rightGrabbed = higgsInterface->GetGrabbedObject(false);
+         if (rightGrabbed && rightGrabbed->baseForm && rightGrabbed->baseForm->formType == kFormType_Weapon)
+        {
+    // Only log on grip press (edge detection)
+   if (!s_rightGripWasPressed)
+{
+           const char* shoulderSide = s_rightControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+          _MESSAGE("VRInputHandler: === HOLSTER GESTURE DETECTED ===");
+        _MESSAGE("VRInputHandler:   RIGHT controller + GRIP pressed + grabbed weapon in %s SHOULDER zone", shoulderSide);
+  _MESSAGE("VRInputHandler:   Weapon FormID: %08X", rightGrabbed->baseForm->formID);
+      }
+            }
+    }
+
+        // ============================================
+// CHECK TRIGGER TOUCH + SHOULDER + GRABBED WEAPON
+// When trigger is TOUCHED while controller with grabbed weapon is in shoulder zone,
+// set HIGGS shoulder radius to 0 to allow holstering
+// ============================================
+
+// Track if we've modified HIGGS settings (to restore them when leaving zone)
+        static bool s_leftShoulderRadiusModified = false;
+        static bool s_rightShoulderRadiusModified = false;
+        static const double SHOULDER_RADIUS_DEFAULT = 11.0;
+        static const double SHOULDER_RADIUS_HOLSTER = 0.0;
+
+        // Check LEFT controller: in shoulder zone + has grabbed weapon + trigger touched
+        bool leftInShoulderWithWeapon = false;
+        if (IsControllerInShoulderZone(true) && s_leftTriggerTouched && higgsInterface)
+        {
+            TESObjectREFR* leftGrabbed = higgsInterface->GetGrabbedObject(true);
+            if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == kFormType_Weapon)
+            {
+                leftInShoulderWithWeapon = true;
+
+                // Set shoulder radius to 0 if not already done
+                if (!s_leftShoulderRadiusModified)
+                {
+                    higgsInterface->SetSettingDouble("LeftShoulderRadius", SHOULDER_RADIUS_HOLSTER);
+                    higgsInterface->SetSettingDouble("RightShoulderRadius", SHOULDER_RADIUS_HOLSTER);
+                    s_leftShoulderRadiusModified = true;
+
+                    const char* shoulderSide = s_leftControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+                    _MESSAGE("VRInputHandler: === HOLSTER MODE ENABLED (LEFT controller) ===");
+                    _MESSAGE("VRInputHandler:   Trigger touched + grabbed weapon in %s SHOULDER zone", shoulderSide);
+                    _MESSAGE("VRInputHandler:   HIGGS shoulder radius set to 0");
+                }
+            }
+        }
+
+        // Restore LEFT controller shoulder radius when conditions no longer met
+        if (s_leftShoulderRadiusModified && !leftInShoulderWithWeapon)
+        {
+            higgsInterface->SetSettingDouble("LeftShoulderRadius", SHOULDER_RADIUS_DEFAULT);
+            higgsInterface->SetSettingDouble("RightShoulderRadius", SHOULDER_RADIUS_DEFAULT);
+            s_leftShoulderRadiusModified = false;
+            _MESSAGE("VRInputHandler: === HOLSTER MODE DISABLED (LEFT controller) ===");
+            _MESSAGE("VRInputHandler:   HIGGS shoulder radius restored to %.1f", SHOULDER_RADIUS_DEFAULT);
+        }
+
+        // Check RIGHT controller: in shoulder zone + has grabbed weapon + trigger touched
+        bool rightInShoulderWithWeapon = false;
+        if (IsControllerInShoulderZone(false) && s_rightTriggerTouched && higgsInterface)
+        {
+            TESObjectREFR* rightGrabbed = higgsInterface->GetGrabbedObject(false);
+            if (rightGrabbed && rightGrabbed->baseForm && rightGrabbed->baseForm->formType == kFormType_Weapon)
+            {
+                rightInShoulderWithWeapon = true;
+
+                // Set shoulder radius to 0 if not already done
+                if (!s_rightShoulderRadiusModified)
+                {
+                    higgsInterface->SetSettingDouble("LeftShoulderRadius", SHOULDER_RADIUS_HOLSTER);
+                    higgsInterface->SetSettingDouble("RightShoulderRadius", SHOULDER_RADIUS_HOLSTER);
+                    s_rightShoulderRadiusModified = true;
+
+                    const char* shoulderSide = s_rightControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+                    _MESSAGE("VRInputHandler: === HOLSTER MODE ENABLED (RIGHT controller) ===");
+                    _MESSAGE("VRInputHandler:   Trigger touched + grabbed weapon in %s SHOULDER zone", shoulderSide);
+                    _MESSAGE("VRInputHandler:   HIGGS shoulder radius set to 0");
+                }
+            }
+        }
+
+        // Restore RIGHT controller shoulder radius when conditions no longer met
+        if (s_rightShoulderRadiusModified && !rightInShoulderWithWeapon)
+        {
+            higgsInterface->SetSettingDouble("LeftShoulderRadius", SHOULDER_RADIUS_DEFAULT);
+            higgsInterface->SetSettingDouble("RightShoulderRadius", SHOULDER_RADIUS_DEFAULT);
+            s_rightShoulderRadiusModified = false;
+            _MESSAGE("VRInputHandler: === HOLSTER MODE DISABLED (RIGHT controller) ===");
+            _MESSAGE("VRInputHandler:   HIGGS shoulder radius restored to %.1f", SHOULDER_RADIUS_DEFAULT);
+        }
+
+        // ============================================
+        // CHECK GRIP PRESSED + SHOULDER + GRABBED WEAPON
+        // Log when grip is pressed while controller with grabbed weapon is in shoulder zone
+        // This indicates weapon is being added to inventory (holstered)
+        // ============================================
+
+        // Check LEFT controller: in shoulder zone + has grabbed weapon + grip pressed
+        if (IsControllerInShoulderZone(true) && s_leftGripPressed && higgsInterface)
+        {
+            TESObjectREFR* leftGrabbed = higgsInterface->GetGrabbedObject(true);
+            if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == kFormType_Weapon)
+            {
+                // Only log on grip press (edge detection)
+                if (!s_leftGripWasPressed)
+                {
+                    const char* shoulderSide = s_leftControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+                    UInt32 weaponFormID = leftGrabbed->baseForm->formID;
+
+                    _MESSAGE("VRInputHandler: === WEAPON ADDED TO INVENTORY (LEFT controller) ===");
+                    _MESSAGE("VRInputHandler:   Grip pressed + grabbed weapon in %s SHOULDER zone", shoulderSide);
+                    _MESSAGE("VRInputHandler:   Weapon FormID: %08X", weaponFormID);
+
+                    // Clear EquipManager tracking to prevent re-equip on trigger pull
+                    bool isLeftGameHand = VRControllerToGameHand(true);
+                    EquipManager::GetSingleton()->ClearDroppedWeaponRef(isLeftGameHand);
+                    EquipManager::GetSingleton()->ClearPendingReequip(isLeftGameHand);
+                    EquipManager::GetSingleton()->ClearCachedWeaponFormID(isLeftGameHand);
+                    _MESSAGE("VRInputHandler:   Cleared tracking for LEFT controller");
+
+                    // Remove duplicate from inventory (HIGGS adds it on holster)
+                    DelayedRemoveItemFromInventory(weaponFormID, 200);
+                    _MESSAGE("VRInputHandler:   Scheduled duplicate removal for FormID: %08X", weaponFormID);
+                }
+            }
+        }
+
+        // Check RIGHT controller: in shoulder zone + has grabbed weapon + grip pressed
+        if (IsControllerInShoulderZone(false) && s_rightGripPressed && higgsInterface)
+        {
+            TESObjectREFR* rightGrabbed = higgsInterface->GetGrabbedObject(false);
+         if (rightGrabbed && rightGrabbed->baseForm && rightGrabbed->baseForm->formType == kFormType_Weapon)
+        {
+                // Only log on grip press (edge detection)
+                if (!s_rightGripWasPressed)
+                {
+                    const char* shoulderSide = s_rightControllerNearLeftShoulder ? "LEFT" : "RIGHT";
+                    UInt32 weaponFormID = rightGrabbed->baseForm->formID;
+
+                    _MESSAGE("VRInputHandler: === WEAPON ADDED TO INVENTORY (RIGHT controller) ===");
+                    _MESSAGE("VRInputHandler:   Grip pressed + grabbed weapon in %s SHOULDER zone", shoulderSide);
+                    _MESSAGE("VRInputHandler:   Weapon FormID: %08X", weaponFormID);
+
+                    // Clear EquipManager tracking to prevent re-equip on trigger pull
+                    bool isRightGameHand = VRControllerToGameHand(false);
+                    EquipManager::GetSingleton()->ClearDroppedWeaponRef(isRightGameHand);
+                    EquipManager::GetSingleton()->ClearPendingReequip(isRightGameHand);
+                    EquipManager::GetSingleton()->ClearCachedWeaponFormID(isRightGameHand);
+                    _MESSAGE("VRInputHandler:   Cleared tracking for RIGHT controller");
+
+                    // Remove duplicate from inventory (HIGGS adds it on holster)
+                    DelayedRemoveItemFromInventory(weaponFormID, 200);
+                    _MESSAGE("VRInputHandler:   Scheduled duplicate removal for FormID: %08X", weaponFormID);
+                }
+            }
+        }
+    }
     
     // Poll trigger state and handle equip/unequip - call this each frame from OnPrePhysicsStep
     void PollTriggerState()
     {
-  BSOpenVR* openVR = (*g_openVR);
+        BSOpenVR* openVR = (*g_openVR);
         if (!openVR || !openVR->vrSystem)
-    return;
+            return;
 
         vr_1_0_12::IVRSystem* vrSystem = openVR->vrSystem;
-      
+
         // Get controller indices
         vr_1_0_12::TrackedDeviceIndex_t leftController = vrSystem->GetTrackedDeviceIndexForControllerRole(
-       vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_LeftHand);
-     vr_1_0_12::TrackedDeviceIndex_t rightController = vrSystem->GetTrackedDeviceIndexForControllerRole(
-       vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_RightHand);
-        
+            vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_LeftHand);
+        vr_1_0_12::TrackedDeviceIndex_t rightController = vrSystem->GetTrackedDeviceIndexForControllerRole(
+            vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_RightHand);
+
         // Get controller state for left hand
         vr_1_0_12::VRControllerState_t leftState;
         if (vrSystem->GetControllerState(leftController, &leftState, sizeof(leftState)))
         {
-       s_leftTriggerWasPressed = s_leftTriggerPressed;
-    // Check both ulButtonPressed (digital) and rAxis[1] (analog trigger)
-  // Button 33 is k_EButton_SteamVR_Trigger
-       const uint64_t TRIGGER_BUTTON_MASK = (1ull << 33);
-      bool digitalPressed = (leftState.ulButtonPressed & TRIGGER_BUTTON_MASK) != 0;
-  bool analogPressed = (leftState.rAxis[1].x > 0.5f);  // Trigger axis
-    s_leftTriggerPressed = digitalPressed || analogPressed;
+            // === TRIGGER ===
+            s_leftTriggerWasPressed = s_leftTriggerPressed;
+            // Check both ulButtonPressed (digital) and rAxis[1] (analog trigger)
+            // Button 33 is k_EButton_SteamVR_Trigger
+            bool digitalPressed = (leftState.ulButtonPressed & TRIGGER_BUTTON_MASK) != 0;
+            bool analogPressed = (leftState.rAxis[1].x > 0.5f);  // Trigger axis
+            s_leftTriggerPressed = digitalPressed || analogPressed;
+
+            // Track trigger TOUCH (ulButtonTouched or light analog input)
+            s_leftTriggerWasTouched = s_leftTriggerTouched;
+            bool digitalTouched = (leftState.ulButtonTouched & TRIGGER_BUTTON_MASK) != 0;
+            bool analogTouched = (leftState.rAxis[1].x > 0.1f);  // Light touch threshold
+            s_leftTriggerTouched = digitalTouched || analogTouched;
+
+            // === LEFT TRIGGER SPAM DETECTION (Weapon Lock) ===
+            if (s_leftTriggerPressed && !s_leftTriggerWasPressed)
+            {
+                // Trigger just pressed - count it for spam detection
+                s_leftTriggerPressCount++;
+
+                if (s_leftTriggerPressCount == 1)
+                {
+                    // First press - start the window timer
+                    s_leftTriggerSpamWindowTimer = 0.0f;
+                }
+
+                _MESSAGE("VRInputHandler: LEFT TRIGGER PRESSED (spam count: %d/%d, window: %.2fs)",
+                    s_leftTriggerPressCount, triggerSpamThreshold, s_leftTriggerSpamWindowTimer);
+
+                // Check if we've hit the threshold within the time window
+                if (s_leftTriggerPressCount >= triggerSpamThreshold && s_leftTriggerSpamWindowTimer <= triggerSpamWindow)
+                {
+                    // Toggle weapon lock state
+                    s_leftWeaponLocked = !s_leftWeaponLocked;
+                    s_leftTriggerPressCount = 0;
+                    s_leftTriggerSpamWindowTimer = 0.0f;
+
+                    if (s_leftWeaponLocked)
+                    {
+                        _MESSAGE("VRInputHandler: === LEFT WEAPON LOCKED TO EQUIPPED ===");
+                        _MESSAGE("VRInputHandler:   Weapon will stay equipped until unlocked (press trigger %d times)", triggerSpamThreshold);
+                    }
+                    else
+                    {
+                        _MESSAGE("VRInputHandler: === LEFT WEAPON UNLOCKED ===");
+                        _MESSAGE("VRInputHandler:   Weapon returned to normal grab mode (release trigger to unequip)");
+                    }
+                }
+            }
+
+            // === GRIP ===
+            s_leftGripWasPressed = s_leftGripPressed;
+            s_leftGripPressed = (leftState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+
+            // Log grip press/release and handle grip spam detection for LEFT controller
+            if (s_leftGripPressed && !s_leftGripWasPressed)
+            {
+                _MESSAGE("VRInputHandler: LEFT GRIP PRESSED");
+            }
+            else if (!s_leftGripPressed && s_leftGripWasPressed)
+            {
+                _MESSAGE("VRInputHandler: LEFT GRIP RELEASED");
+
+                // Grip spam detection for LEFT VR controller (count RELEASES, not presses)
+                s_leftGripPressCount++;
+
+                if (s_leftGripPressCount == 1)
+                {
+                    // First release - start the window timer
+                    s_leftGripSpamWindowTimer = 0.0f;
+                }
+
+                _MESSAGE("VRInputHandler: LEFT grip release count: %d/%d (window: %.2fs)",
+                    s_leftGripPressCount, gripSpamThreshold, s_leftGripSpamWindowTimer);
+
+                // Check if we've hit the threshold within the time window
+                if (s_leftGripPressCount >= gripSpamThreshold && s_leftGripSpamWindowTimer <= gripSpamWindow)
+                {
+                    // Disable drop protection for LEFT controller only
+                    s_leftDropProtectionDisabled = true;
+                    s_leftDropProtectionDisableTimer = dropProtectionDisableTime;
+                    s_leftGripPressCount = 0;
+                    s_leftGripSpamWindowTimer = 0.0f;
+                    _MESSAGE("VRInputHandler: === LEFT DROP PROTECTION DISABLED FOR %.1f SECONDS ===", dropProtectionDisableTime);
+                }
+            }
         }
-   
+
         // Get controller state for right hand
         vr_1_0_12::VRControllerState_t rightState;
-      if (vrSystem->GetControllerState(rightController, &rightState, sizeof(rightState)))
+        if (vrSystem->GetControllerState(rightController, &rightState, sizeof(rightState)))
         {
+            // === TRIGGER ===
             s_rightTriggerWasPressed = s_rightTriggerPressed;
-   const uint64_t TRIGGER_BUTTON_MASK = (1ull << 33);
-     bool digitalPressed = (rightState.ulButtonPressed & TRIGGER_BUTTON_MASK) != 0;
+            bool digitalPressed = (rightState.ulButtonPressed & TRIGGER_BUTTON_MASK) != 0;
             bool analogPressed = (rightState.rAxis[1].x > 0.5f);  // Trigger axis
-      s_rightTriggerPressed = digitalPressed || analogPressed;
-        }
- 
-    // Debug logging every 100 frames
- static int debugCounter = 0;
-    debugCounter++;
-        if (debugCounter % 100 == 0)
-        {
-          bool offHandIsLeft = GetCollisionAvoidanceHandIsLeft();
-            TESObjectREFR* droppedWeapon = EquipManager::GetSingleton()->GetDroppedWeaponRef(offHandIsLeft);
-            bool offHandVRControllerIsLeft = GameHandToVRController(offHandIsLeft);
-        bool offHandTrigger = offHandVRControllerIsLeft ? s_leftTriggerPressed : s_rightTriggerPressed;
+            s_rightTriggerPressed = digitalPressed || analogPressed;
 
-          _MESSAGE("PollTriggerState DEBUG: LeftTrig=%s RightTrig=%s OffHandIsLeft=%s DroppedWeapon=%p OffHandTrigger=%s",
-        s_leftTriggerPressed ? "YES" : "NO",
-          s_rightTriggerPressed ? "YES" : "NO",
-       offHandIsLeft ? "YES" : "NO",
-  droppedWeapon,
-                offHandTrigger ? "YES" : "NO");
-  }
-   
-        // ============================================
-   // TRIGGER-BASED WEAPON EQUIP/UNEQUIP LOGIC
-    // Works for ANY weapon: single weapon, dual-wield, or shield+weapon
-        // ============================================
-        
-        // Check BOTH hands for grabbed weapons
-      TESObjectREFR* droppedWeaponLeft = EquipManager::GetSingleton()->GetDroppedWeaponRef(true);
-        TESObjectREFR* droppedWeaponRight = EquipManager::GetSingleton()->GetDroppedWeaponRef(false);
-        
-        // Process LEFT hand
-        // Add validity checks to prevent CTD on stale references
-    if (droppedWeaponLeft)
-  {
-    // Verify the reference is still valid before accessing it
- bool isValid = false;
-       __try {
- isValid = (droppedWeaponLeft->baseForm != nullptr && 
-   droppedWeaponLeft->formType == kFormType_Reference);
-  }
-     __except(EXCEPTION_EXECUTE_HANDLER) {
-   _MESSAGE("VRInputHandler: LEFT hand dropped weapon reference is INVALID (exception) - clearing");
-      ClearGrabbedWeapon(GameHandToVRController(true));
-     EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
-     EquipManager::GetSingleton()->ClearPendingReequip(true);
-     droppedWeaponLeft = nullptr;
-  }
-      
-      if (droppedWeaponLeft && isValid)
+            // Track trigger TOUCH (ulButtonTouched or light analog input)
+            s_rightTriggerWasTouched = s_rightTriggerTouched;
+            bool digitalTouched = (rightState.ulButtonTouched & TRIGGER_BUTTON_MASK) != 0;
+            bool analogTouched = (rightState.rAxis[1].x > 0.1f);  // Light touch threshold
+            s_rightTriggerTouched = digitalTouched || analogTouched;
+
+            // === RIGHT TRIGGER SPAM DETECTION (Weapon Lock) ===
+            if (s_rightTriggerPressed && !s_rightTriggerWasPressed)
             {
-            bool leftVRTrigger = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
+                // Trigger just pressed - count it for spam detection
+                s_rightTriggerPressCount++;
 
-        if (leftVRTrigger)
- {
-         _MESSAGE("VRInputHandler: LEFT hand TRIGGER HELD - Re-equipping grabbed weapon");
-  
-   bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(true);
-   
-   PlayerCharacter* player = *g_thePlayer;
+                if (s_rightTriggerPressCount == 1)
+                {
+                    // First press - start the window timer
+                    s_rightTriggerSpamWindowTimer = 0.0f;
+                }
+
+                _MESSAGE("VRInputHandler: RIGHT TRIGGER PRESSED (spam count: %d/%d, window: %.2fs)",
+                    s_rightTriggerPressCount, triggerSpamThreshold, s_rightTriggerSpamWindowTimer);
+
+                // Check if we've hit the threshold within the time window
+                if (s_rightTriggerPressCount >= triggerSpamThreshold && s_rightTriggerSpamWindowTimer <= triggerSpamWindow)
+                {
+                    // Toggle weapon lock state
+                    s_rightWeaponLocked = !s_rightWeaponLocked;
+                    s_rightTriggerPressCount = 0;
+                    s_rightTriggerSpamWindowTimer = 0.0f;
+
+                    if (s_rightWeaponLocked)
+                    {
+                        _MESSAGE("VRInputHandler: === RIGHT WEAPON LOCKED TO EQUIPPED ===");
+                        _MESSAGE("VRInputHandler:   Weapon will stay equipped until unlocked (press trigger %d times)", triggerSpamThreshold);
+                    }
+                    else
+                    {
+                        _MESSAGE("VRInputHandler: === RIGHT WEAPON UNLOCKED ===");
+                        _MESSAGE("VRInputHandler:   Weapon returned to normal grab mode (release trigger to unequip)");
+                    }
+                }
+            }
+
+            // === GRIP ===
+            s_rightGripWasPressed = s_rightGripPressed;
+            s_rightGripPressed = (rightState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+
+            // Log grip press/release and handle grip spam detection for RIGHT controller
+            if (s_rightGripPressed && !s_rightGripWasPressed)
+            {
+                _MESSAGE("VRInputHandler: RIGHT GRIP PRESSED");
+            }
+            else if (!s_rightGripPressed && s_rightGripWasPressed)
+            {
+                _MESSAGE("VRInputHandler: RIGHT GRIP RELEASED");
+
+                // Grip spam detection for RIGHT VR controller (count RELEASES, not presses)
+                s_rightGripPressCount++;
+
+                if (s_rightGripPressCount == 1)
+                {
+                    // First release - start the window timer
+                    s_rightGripSpamWindowTimer = 0.0f;
+                }
+
+                _MESSAGE("VRInputHandler: RIGHT grip release count: %d/%d (window: %.2fs)",
+                    s_rightGripPressCount, gripSpamThreshold, s_rightGripSpamWindowTimer);
+
+                if (s_rightGripPressCount >= gripSpamThreshold && s_rightGripSpamWindowTimer <= gripSpamWindow)
+                {
+                    // Disable drop protection for RIGHT controller only
+                    s_rightDropProtectionDisabled = true;
+                    s_rightDropProtectionDisableTimer = dropProtectionDisableTime;
+                    s_rightGripPressCount = 0;
+                    s_rightGripSpamWindowTimer = 0.0f;
+                    _MESSAGE("VRInputHandler: === RIGHT DROP PROTECTION DISABLED FOR %.1f SECONDS ===", dropProtectionDisableTime);
+                }
+            }
+
+            // ============================================
+                // UPDATE DROP PROTECTION TIMERS
+                // ============================================
+            const float frameTime = 0.011f;
+
+            // Update LEFT drop protection disable timer
+            if (s_leftDropProtectionDisabled)
+            {
+                s_leftDropProtectionDisableTimer -= frameTime;
+                if (s_leftDropProtectionDisableTimer <= 0.0f)
+                {
+                    s_leftDropProtectionDisabled = false;
+                    s_leftDropProtectionDisableTimer = 0.0f;
+                    _MESSAGE("VRInputHandler: === LEFT DROP PROTECTION RE-ENABLED ===");
+                }
+            }
+
+            // Update RIGHT drop protection disable timer
+            if (s_rightDropProtectionDisabled)
+            {
+                s_rightDropProtectionDisableTimer -= frameTime;
+                if (s_rightDropProtectionDisableTimer <= 0.0f)
+                {
+                    s_rightDropProtectionDisabled = false;
+                    s_rightDropProtectionDisableTimer = 0.0f;
+                    _MESSAGE("VRInputHandler: === RIGHT DROP PROTECTION RE-ENABLED ===");
+                }
+            }
+
+            // ============================================
+        // UPDATE GRIP SPAM TIMERS
+        // ============================================
+
+        // Update LEFT controller grip spam window timer
+            if (s_leftGripPressCount > 0)
+            {
+                s_leftGripSpamWindowTimer += frameTime;
+                // Reset if window expired
+                if (s_leftGripSpamWindowTimer > gripSpamWindow)
+                {
+                    if (s_leftGripPressCount > 0)
+                    {
+                        _MESSAGE("VRInputHandler: LEFT grip spam window expired - resetting count");
+                    }
+                    s_leftGripPressCount = 0;
+                    s_leftGripSpamWindowTimer = 0.0f;
+                }
+            }
+
+            // Update RIGHT controller grip spam window timer
+            if (s_rightGripPressCount > 0)
+            {
+                s_rightGripSpamWindowTimer += frameTime;
+                // Reset if window expired
+                if (s_rightGripSpamWindowTimer > gripSpamWindow)
+                {
+                    if (s_rightGripPressCount > 0)
+                    {
+                        _MESSAGE("VRInputHandler: RIGHT grip spam window expired - resetting count");
+                    }
+                    s_rightGripPressCount = 0;
+                    s_rightGripSpamWindowTimer = 0.0f;
+                }
+            }
+
+
+            // ============================================
+                // UPDATE TRIGGER SPAM TIMERS (Weapon Lock)
+            // ============================================
+
+                // Update LEFT controller trigger spam window timer
+            if (s_leftTriggerPressCount > 0)
+            {
+                s_leftTriggerSpamWindowTimer += frameTime;
+                // Reset if window expired
+                if (s_leftTriggerSpamWindowTimer > triggerSpamWindow)
+                {
+                    if (s_leftTriggerPressCount > 0)
+                    {
+                        _MESSAGE("VRInputHandler: LEFT trigger spam window expired - resetting count");
+                    }
+                    s_leftTriggerPressCount = 0;
+                    s_leftTriggerSpamWindowTimer = 0.0f;
+                }
+            }
+
+            // Update RIGHT controller trigger spam window timer
+            if (s_rightTriggerPressCount > 0)
+            {
+                s_rightTriggerSpamWindowTimer += frameTime;
+                // Reset if window expired
+                if (s_rightTriggerSpamWindowTimer > triggerSpamWindow)
+                {
+                    if (s_rightTriggerPressCount > 0)
+                    {
+                        _MESSAGE("VRInputHandler: RIGHT trigger spam window expired - resetting count");
+                    }
+                    s_rightTriggerPressCount = 0;
+                    s_rightTriggerSpamWindowTimer = 0.0f;
+                }
+            }
+            // Check shoulder zone proximity
+            CheckShoulderZones();
+
+            // Debug logging every 100 frames
+            static int debugCounter = 0;
+            debugCounter++;
+            if (debugCounter % 100 == 0)
+            {
+                bool offHandIsLeft = GetCollisionAvoidanceHandIsLeft();
+                TESObjectREFR* droppedWeapon = EquipManager::GetSingleton()->GetDroppedWeaponRef(offHandIsLeft);
+                bool offHandVRController = GameHandToVRController(offHandIsLeft);
+                bool offHandTrigger = offHandVRController ? s_leftTriggerPressed : s_rightTriggerPressed;
+
+                _MESSAGE("PollTriggerState DEBUG: LeftTrig=%s RightTrig=%s OffHandIsLeft=%s DroppedWeapon=%p OffHandTrigger=%s",
+                    s_leftTriggerPressed ? "YES" : "NO",
+                    s_rightTriggerPressed ? "YES" : "NO",
+                    offHandIsLeft ? "YES" : "NO",
+                    droppedWeapon,
+                    offHandTrigger ? "YES" : "NO");
+            }
+
+            // ============================================
+       // TRIGGER-BASED WEAPON EQUIP/UNEQUIP LOGIC
+        // Works for ANY weapon: single weapon, dual-wield, or shield+weapon
+            // ============================================
+
+            // Check BOTH hands for grabbed weapons
+            TESObjectREFR* droppedWeaponLeft = EquipManager::GetSingleton()->GetDroppedWeaponRef(true);
+            TESObjectREFR* droppedWeaponRight = EquipManager::GetSingleton()->GetDroppedWeaponRef(false);
+
+            // Process LEFT hand
+            // Add validity checks to prevent CTD on stale references
+            if (droppedWeaponLeft)
+            {
+                // Verify the reference is still valid before accessing it
+                bool isValid = false;
+                __try {
+                    isValid = (droppedWeaponLeft->baseForm != nullptr &&
+                        droppedWeaponLeft->formType == kFormType_Reference);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    _MESSAGE("VRInputHandler: LEFT hand dropped weapon reference is INVALID (exception) - clearing");
+                    // REMOVED: ClearGrabbedWeapon(GameHandToVRController(true));
+                    EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
+                    EquipManager::GetSingleton()->ClearPendingReequip(true);
+                    droppedWeaponLeft = nullptr;
+                }
+
+                if (droppedWeaponLeft && isValid)
+                {
+                    bool leftVRTrigger = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
+
+                    if (leftVRTrigger)
+                    {
+                        _MESSAGE("VRInputHandler: LEFT hand TRIGGER HELD - Re-equipping grabbed weapon");
+
+                        bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(true);
+
+                        PlayerCharacter* player = *g_thePlayer;
+                        if (player)
+                        {
+                            if (wasDualWieldingSame)
+                            {
+                                DeleteWorldObject(droppedWeaponLeft);
+                            }
+                            else
+                            {
+                                EquipManager::s_suppressPickupSound = true;
+                                SafeActivate(droppedWeaponLeft, player, 0, 0, 1, false);
+                                EquipManager::s_suppressPickupSound = false;
+                            }
+
+                            // Clear grabbed weapon tracking (restores scale to 1.0)
+                            // REMOVED: ClearGrabbedWeapon(GameHandToVRController(true));
+
+                            EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
+                            EquipManager::GetSingleton()->ClearPendingReequip(true);
+
+                            EquipManager::s_suppressDrawSound = true;
+                            EquipManager::GetSingleton()->ForceReequipLeftHand();
+                            EquipManager::s_suppressDrawSound = false;
+
+                            _MESSAGE("VRInputHandler: Weapon re-equipped to LEFT hand (trigger held)");
+                        }
+                    }
+                }
+            }
+
+            // Process RIGHT hand
+        // Add validity checks to prevent CTD on stale references
+            if (droppedWeaponRight)
+            {
+                // Verify the reference is still valid before accessing it
+                bool isValid = false;
+                __try {
+                    isValid = (droppedWeaponRight->baseForm != nullptr &&
+                        droppedWeaponRight->formType == kFormType_Reference);
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    _MESSAGE("VRInputHandler: RIGHT hand dropped weapon reference is INVALID (exception) - clearing");
+                    // REMOVED: ClearGrabbedWeapon(GameHandToVRController(false));
+                    EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
+                    EquipManager::GetSingleton()->ClearPendingReequip(false);
+                    droppedWeaponRight = nullptr;
+                }
+
+                if (droppedWeaponRight && isValid)
+                {
+                    bool rightVRTrigger = GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed;
+
+                    if (rightVRTrigger)
+                    {
+                        _MESSAGE("VRInputHandler: RIGHT hand TRIGGER HELD - Re-equipping grabbed weapon");
+
+                        bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(false);
+
+                        PlayerCharacter* player = *g_thePlayer;
+                        if (player)
+                        {
+                            if (wasDualWieldingSame)
+                            {
+                                DeleteWorldObject(droppedWeaponRight);
+                            }
+                            else
+                            {
+                                EquipManager::s_suppressPickupSound = true;
+                                SafeActivate(droppedWeaponRight, player, 0, 0, 1, false);
+                                EquipManager::s_suppressPickupSound = false;
+                            }
+
+                            // Clear grabbed weapon tracking (restores scale to 1.0)
+                            // REMOVED: ClearGrabbedWeapon(GameHandToVRController(false));
+
+                            EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
+                            EquipManager::GetSingleton()->ClearPendingReequip(false);
+
+                            EquipManager::s_suppressDrawSound = true;
+                            EquipManager::GetSingleton()->ForceReequipRightHand();
+                            EquipManager::s_suppressDrawSound = false;
+
+                            _MESSAGE("VRInputHandler: Weapon re-equipped to RIGHT hand (trigger held)");
+                        }
+                    }
+                }
+            }
+
+            // ============================================
+    // TRIGGER RELEASED - Start delayed unequip timer for EACH hand
+      // ============================================
+
+            // LEFT hand trigger released
+            bool leftVRTriggerWas = GameHandToVRController(true) ? s_leftTriggerWasPressed : s_rightTriggerWasPressed;
+            bool leftVRTriggerNow = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
+
+            // Get which VR controller corresponds to left game hand (for weapon lock check)
+            bool leftGameHandVRController = GameHandToVRController(true);
+            bool leftWeaponIsLocked = leftGameHandVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
+
+            if (!leftVRTriggerNow && leftVRTriggerWas && !droppedWeaponLeft)
+            {
+                // Check if left hand has an equipped weapon
+                PlayerCharacter* player = *g_thePlayer;
                 if (player)
-      {
-    if (wasDualWieldingSame)
-    {
-    DeleteWorldObject(droppedWeaponLeft);
- }
-        else
-       {
-    EquipManager::s_suppressPickupSound = true;
-       SafeActivate(droppedWeaponLeft, player, 0, 0, 1, false);
-     EquipManager::s_suppressPickupSound = false;
-    }
+                {
+                    TESForm* leftEquipped = player->GetEquippedObject(true);
+                    if (leftEquipped && EquipManager::IsWeapon(leftEquipped))
+                    {
+                        // Check if weapon is locked - if so, don't start unequip timer
+                        if (leftWeaponIsLocked)
+                        {
+                            _MESSAGE("VRInputHandler: LEFT hand TRIGGER RELEASED - Weapon is LOCKED, staying equipped");
+                        }
+                        else
+                        {
+                            s_pendingTriggerUnequip = true;
+                            s_triggerUnequipTimer = 0.0f;
+                            s_pendingUnequipHand = true;  // true = left hand
+                            _MESSAGE("VRInputHandler: LEFT hand TRIGGER RELEASED - Starting %.3f sec delay before unequip", triggerUnequipDelay);
+                        }
+                    }
+                }
+            }
 
-     // Clear grabbed weapon tracking (restores scale to 1.0)
-     ClearGrabbedWeapon(GameHandToVRController(true));
-     
-        EquipManager::GetSingleton()->ClearDroppedWeaponRef(true);
-    EquipManager::GetSingleton()->ClearPendingReequip(true);
-     
-    EquipManager::s_suppressDrawSound = true;
-   EquipManager::GetSingleton()->ForceReequipLeftHand();
-    EquipManager::s_suppressDrawSound = false;
-        
-     _MESSAGE("VRInputHandler: Weapon re-equipped to LEFT hand (trigger held)");
-      }
- }
-        }
-    }
-   
-        // Process RIGHT hand
-    // Add validity checks to prevent CTD on stale references
-        if (droppedWeaponRight)
-  {
-            // Verify the reference is still valid before accessing it
-   bool isValid = false;
-      __try {
-      isValid = (droppedWeaponRight->baseForm != nullptr && 
-           droppedWeaponRight->formType == kFormType_Reference);
-     }
-        __except(EXCEPTION_EXECUTE_HANDLER) {
-        _MESSAGE("VRInputHandler: RIGHT hand dropped weapon reference is INVALID (exception) - clearing");
-        ClearGrabbedWeapon(GameHandToVRController(false));
-     EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
-         EquipManager::GetSingleton()->ClearPendingReequip(false);
-         droppedWeaponRight = nullptr;
- }
-        
-   if (droppedWeaponRight && isValid)
-     {
- bool rightVRTrigger = GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed;
-        
-      if (rightVRTrigger)
-       {
- _MESSAGE("VRInputHandler: RIGHT hand TRIGGER HELD - Re-equipping grabbed weapon");
-      
-  bool wasDualWieldingSame = EquipManager::GetSingleton()->WasDualWieldingSameWeapon(false);
-       
-    PlayerCharacter* player = *g_thePlayer;
- if (player)
-        {
-      if (wasDualWieldingSame)
-     {
-     DeleteWorldObject(droppedWeaponRight);
-     }
-    else
-        {
-        EquipManager::s_suppressPickupSound = true;
-       SafeActivate(droppedWeaponRight, player, 0, 0, 1, false);
-        EquipManager::s_suppressPickupSound = false;
-       }
+            // RIGHT hand trigger released
+            bool rightVRTriggerWas = GameHandToVRController(false) ? s_leftTriggerWasPressed : s_rightTriggerWasPressed;
+            bool rightVRTriggerNow = GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed;
 
-     // Clear grabbed weapon tracking (restores scale to 1.0)
-     ClearGrabbedWeapon(GameHandToVRController(false));
-     
-      EquipManager::GetSingleton()->ClearDroppedWeaponRef(false);
-      EquipManager::GetSingleton()->ClearPendingReequip(false);
-     
-   EquipManager::s_suppressDrawSound = true;
-   EquipManager::GetSingleton()->ForceReequipRightHand();
-  EquipManager::s_suppressDrawSound = false;
-        
-      _MESSAGE("VRInputHandler: Weapon re-equipped to RIGHT hand (trigger held)");
-    }
-  }
+            // Get which VR controller corresponds to right game hand (for weapon lock check)
+            bool rightGameHandVRController = GameHandToVRController(false);
+            bool rightWeaponIsLocked = rightGameHandVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
+
+            if (!rightVRTriggerNow && rightVRTriggerWas && !droppedWeaponRight)
+            {
+                // Check if right hand has an equipped weapon
+                PlayerCharacter* player = *g_thePlayer;
+                if (player)
+                {
+                    TESForm* rightEquipped = player->GetEquippedObject(false);
+                    if (rightEquipped && EquipManager::IsWeapon(rightEquipped))
+                    {
+                        // Check if weapon is locked - if so, don't start unequip timer
+                        if (rightWeaponIsLocked)
+                        {
+                            _MESSAGE("VRInputHandler: RIGHT hand TRIGGER RELEASED - Weapon is LOCKED, staying equipped");
+                        }
+                        else
+                        {
+                            s_pendingTriggerUnequip = true;
+                            s_triggerUnequipTimer = 0.0f;
+                            s_pendingUnequipHand = false;  // false = right hand
+                            _MESSAGE("VRInputHandler: RIGHT hand TRIGGER RELEASED - Starting %.3f sec delay before unequip", triggerUnequipDelay);
+                        }
+                    }
+                }
+            }
+
+            // ============================================
+                // CANCEL pending unequip if trigger pressed again
+                // ============================================
+            bool pendingHandTrigger = s_pendingUnequipHand ?
+                (GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed) :
+                (GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed);
+
+            if (pendingHandTrigger && s_pendingTriggerUnequip)
+            {
+                s_pendingTriggerUnequip = false;
+                s_triggerUnequipTimer = 0.0f;
+                _MESSAGE("VRInputHandler: Trigger pressed - cancelled pending unequip");
+            }
+
+            // ============================================
+                    // PROCESS pending unequip after delay
+                    // ============================================
+            if (s_pendingTriggerUnequip)
+            {
+                s_triggerUnequipTimer += 0.011f;  // ~90fps
+
+                if (s_triggerUnequipTimer >= triggerUnequipDelay)
+                {
+                    s_pendingTriggerUnequip = false;
+                    s_triggerUnequipTimer = 0.0f;
+
+                    bool handToUnequip = s_pendingUnequipHand;
+
+                    // Final check: is weapon now locked? (player may have spammed trigger during delay)
+                    bool handVRController = GameHandToVRController(handToUnequip);
+                    bool weaponNowLocked = handVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
+
+                    if (weaponNowLocked)
+                    {
+                        _MESSAGE("VRInputHandler: Delay elapsed but weapon is now LOCKED - keeping equipped");
+                    }
+                    else
+                    {
+                        PlayerCharacter* player = *g_thePlayer;
+                        if (player)
+                        {
+                            TESForm* handEquipped = player->GetEquippedObject(handToUnequip);
+
+                            if (handEquipped && EquipManager::IsWeapon(handEquipped))
+                            {
+                                _MESSAGE("VRInputHandler: Delay elapsed - Unequipping %s hand weapon for HIGGS grab",
+                                    handToUnequip ? "LEFT" : "RIGHT");
+                                EquipManager::GetSingleton()->ForceUnequipAndGrab(handToUnequip);
+                            }
+                        }
+                    }
+                }
+            }
         }
-    }
-   
-        // ============================================
-// TRIGGER RELEASED - Start delayed unequip timer for EACH hand
-  // ============================================
-  
-        // LEFT hand trigger released
-        bool leftVRTriggerWas = GameHandToVRController(true) ? s_leftTriggerWasPressed : s_rightTriggerWasPressed;
-bool leftVRTriggerNow = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
- 
-     if (!leftVRTriggerNow && leftVRTriggerWas && !droppedWeaponLeft)
-        {
-    // Check if left hand has an equipped weapon
-   PlayerCharacter* player = *g_thePlayer;
-     if (player)
-      {
-     TESForm* leftEquipped = player->GetEquippedObject(true);
-  if (leftEquipped && EquipManager::IsWeapon(leftEquipped))
-     {
-   s_pendingTriggerUnequip = true;
-      s_triggerUnequipTimer = 0.0f;
-     s_pendingUnequipHand = true;  // true = left hand
-        _MESSAGE("VRInputHandler: LEFT hand TRIGGER RELEASED - Starting %.3f sec delay before unequip", triggerUnequipDelay);
-       }
-   }
         }
-        
-    // RIGHT hand trigger released
-        bool rightVRTriggerWas = GameHandToVRController(false) ? s_leftTriggerWasPressed : s_rightTriggerWasPressed;
-        bool rightVRTriggerNow = GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed;
-        
-        if (!rightVRTriggerNow && rightVRTriggerWas && !droppedWeaponRight)
-   {
-     // Check if right hand has an equipped weapon
- PlayerCharacter* player = *g_thePlayer;
-  if (player)
-    {
-   TESForm* rightEquipped = player->GetEquippedObject(false);
-      if (rightEquipped && EquipManager::IsWeapon(rightEquipped))
- {
-     s_pendingTriggerUnequip = true;
-     s_triggerUnequipTimer = 0.0f;
-    s_pendingUnequipHand = false;  // false = right hand
-    _MESSAGE("VRInputHandler: RIGHT hand TRIGGER RELEASED - Starting %.3f sec delay before unequip", triggerUnequipDelay);
-      }
-       }
-     }
-        
- // ============================================
-     // CANCEL pending unequip if trigger pressed again
-     // ============================================
-        bool pendingHandTrigger = s_pendingUnequipHand ? 
- (GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed) :
-   (GameHandToVRController(false) ? s_leftTriggerPressed : s_rightTriggerPressed);
-        
-if (pendingHandTrigger && s_pendingTriggerUnequip)
-        {
-     s_pendingTriggerUnequip = false;
-    s_triggerUnequipTimer = 0.0f;
-       _MESSAGE("VRInputHandler: Trigger pressed - cancelled pending unequip");
-  }
-      
-// ============================================
-        // PROCESS pending unequip after delay
-        // ============================================
-        if (s_pendingTriggerUnequip)
-        {
-   s_triggerUnequipTimer += 0.011f;  // ~90fps
-       
-  if (s_triggerUnequipTimer >= triggerUnequipDelay)
-      {
-     s_pendingTriggerUnequip = false;
-    s_triggerUnequipTimer = 0.0f;
-        
- bool handToUnequip = s_pendingUnequipHand;
-        
-     PlayerCharacter* player = *g_thePlayer;
-     if (player)
-    {
-       TESForm* handEquipped = player->GetEquippedObject(handToUnequip);
-    
-       if (handEquipped && EquipManager::IsWeapon(handEquipped))
-     {
-    _MESSAGE("VRInputHandler: Delay elapsed - Unequipping %s hand weapon for HIGGS grab", 
-        handToUnequip ? "LEFT" : "RIGHT");
-     EquipManager::GetSingleton()->ForceUnequipAndGrab(handToUnequip);
-    }
-         }
-      }
- }
-    }
 
     bool VRInputHandler::IsLeftTriggerPressed() { return s_leftTriggerPressed; }
     bool VRInputHandler::IsRightTriggerPressed() { return s_rightTriggerPressed; }
@@ -2465,13 +3322,75 @@ if (pendingHandTrigger && s_pendingTriggerUnequip)
     // Check if trigger is pressed for the VR controller corresponding to a game hand
     bool VRInputHandler::IsTriggerHeldForGameHand(bool isLeftGameHand)
     {
-      bool isLeftVRController = GameHandToVRController(isLeftGameHand);
+    bool isLeftVRController = GameHandToVRController(isLeftGameHand);
         return isLeftVRController ? s_leftTriggerPressed : s_rightTriggerPressed;
+    }
+    
+    // Grip button accessors
+    bool VRInputHandler::IsLeftGripPressed() { return s_leftGripPressed; }
+    bool VRInputHandler::IsRightGripPressed() { return s_rightGripPressed; }
+    
+    // Check if grip is pressed for the VR controller corresponding to a game hand
+    bool VRInputHandler::IsGripHeldForGameHand(bool isLeftGameHand)
+    {
+        bool isLeftVRController = GameHandToVRController(isLeftGameHand);
+  return isLeftVRController ? s_leftGripPressed : s_rightGripPressed;
+    }
+    
+    // ============================================
+    // Drop Protection Override Accessors
+    // ============================================
+    
+    bool VRInputHandler::IsDropProtectionDisabled(bool isLeftVRController)
+    {
+      return isLeftVRController ? s_leftDropProtectionDisabled : s_rightDropProtectionDisabled;
+    }
+    
+    float VRInputHandler::GetDropProtectionDisableTimeRemaining(bool isLeftVRController)
+    {
+   return isLeftVRController ? s_leftDropProtectionDisableTimer : s_rightDropProtectionDisableTimer;
+    }
+    
+    // ============================================
+    // Weapon Lock Accessors
+    // ============================================
+    
+    bool VRInputHandler::IsWeaponLocked(bool isLeftVRController)
+    {
+return isLeftVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
+    }
+    
+  void VRInputHandler::ClearWeaponLock(bool isLeftVRController)
+    {
+       if (isLeftVRController)
+     {
+       if (s_leftWeaponLocked)
+   {
+      _MESSAGE("VRInputHandler: Clearing LEFT weapon lock (weapon dropped/unequipped)");
+    }
+  s_leftWeaponLocked = false;
+       s_leftTriggerPressCount = 0;
+       s_leftTriggerSpamWindowTimer = 0.0f;
+        }
+     else
+        {
+      if (s_rightWeaponLocked)
+   {
+         _MESSAGE("VRInputHandler: Clearing RIGHT weapon lock (weapon dropped/unequipped)");
+    }
+  s_rightWeaponLocked = false;
+   s_rightTriggerPressCount = 0;
+ s_rightTriggerSpamWindowTimer = 0.0f;
+        }
     }
     
     void VRInputHandler::RegisterTriggerCallback()
     {
-  _MESSAGE("VRInputHandler: Trigger button tracking initialized (polled in OnPrePhysicsStep)");
+  _MESSAGE("VRInputHandler: Trigger and Grip button tracking initialized (polled in OnPrePhysicsStep)");
+        _MESSAGE("VRInputHandler: Drop protection override: Press grip %d times within %.1fs to disable for %.1fs",
+   gripSpamThreshold, gripSpamWindow, dropProtectionDisableTime);
+    _MESSAGE("VRInputHandler: Weapon lock: Press trigger %d times within %.1fs to toggle lock",
+   triggerSpamThreshold, triggerSpamWindow);
     }
 }
 

@@ -23,6 +23,27 @@ namespace FalseEdgeVR {
 	// Trigger-based weapon hold settings
 	float triggerUnequipDelay = 0.1f;     // Delay (seconds) after trigger release before unequipping (100ms default)
 
+	// Intentional drop settings (grip spam detection)
+	int gripSpamThreshold = 4;       // Number of grip releases to trigger intentional drop
+	float gripSpamWindow = 2.0f;   // Time window (seconds) for grip releases
+	float dropProtectionDisableTime = 3.0f; // How long drop protection is disabled (seconds)
+
+	// Weapon lock settings (trigger spam detection)
+	int triggerSpamThreshold = 4;      // Number of trigger presses to toggle weapon lock
+	float triggerSpamWindow = 2.0f;     // Time window (seconds) for trigger presses
+
+	// Weapon spawn offset settings (when unequipping for HIGGS grab)
+	// Non-mounted: spawn behind player so they can't see it
+	float spawnOffsetX = 0.0f;       // X offset (left/right) - usually 0
+	float spawnOffsetY = 0.0f;       // Y offset (forward/back adjustment) - usually 0
+	float spawnOffsetZ = -20.0f;     // Z offset (up/down) - negative = below player
+	float spawnDistance = 150.0f;    // Distance behind player (units, 70 = ~1 meter)
+	
+	// Mounted: spawn elevated to avoid horse collision
+	float spawnOffsetMountedX = 0.0f;   // X offset when mounted
+	float spawnOffsetMountedY = 0.0f;   // Y offset when mounted
+	float spawnOffsetMountedZ = 50.0f;  // Z offset when mounted (positive = above hand)
+
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	int collisionAvoidanceHand = 0;             // Default: left hand gets unequipped/grabbed during dual-wield collision
 
@@ -50,10 +71,6 @@ namespace FalseEdgeVR {
 
 	// Equipment change grace period
 	int equipGraceFrames = 20;    // Frames to wait after equipment change before collision detection (~0.22 sec at 90fps)
-
-	// Grabbed weapon scaling settings
-	bool weaponScalingEnabled = true;   // Enable weapon scaling when HIGGS grabbed (default enabled)
-	float weaponGrabbedScale = 0.85f; // Scale factor for grabbed weapons (0.85 = 85% of original size)
 
 	void loadConfig() 
 	{
@@ -155,7 +172,7 @@ namespace FalseEdgeVR {
 
 						if (variableName == "Enabled")
 						{
-							autoEquipGrabbedWeaponEnabled = (std::stoi(variableValueStr) != 0);
+							autoEquipGrabbedWeaponEnabled = (std::stoi(variableValueStr)) != 0;
 						}
 						else if (variableName == "Delay")
 						{
@@ -170,6 +187,78 @@ namespace FalseEdgeVR {
 						if (variableName == "UnequipDelay")
 						{
 							triggerUnequipDelay = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "IntentionalDrop")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "GripSpamThreshold")
+						{
+							gripSpamThreshold = std::stoi(variableValueStr);
+						}
+						else if (variableName == "GripSpamWindow")
+						{
+							gripSpamWindow = std::stof(variableValueStr);
+						}
+						else if (variableName == "DropProtectionDisableTime")
+						{
+							dropProtectionDisableTime = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "WeaponLock")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "SpamThreshold")
+						{
+							triggerSpamThreshold = std::stoi(variableValueStr);
+						}
+						else if (variableName == "SpamWindow")
+						{
+							triggerSpamWindow = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "WeaponSpawn")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "OffsetX")
+						{
+							spawnOffsetX = std::stof(variableValueStr);
+						}
+						else if (variableName == "OffsetY")
+						{
+							spawnOffsetY = std::stof(variableValueStr);
+						}
+						else if (variableName == "OffsetZ")
+						{
+							spawnOffsetZ = std::stof(variableValueStr);
+						}
+						else if (variableName == "Distance")
+						{
+							spawnDistance = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "WeaponSpawnMounted")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "OffsetX")
+						{
+							spawnOffsetMountedX = std::stof(variableValueStr);
+						}
+						else if (variableName == "OffsetY")
+						{
+							spawnOffsetMountedY = std::stof(variableValueStr);
+						}
+						else if (variableName == "OffsetZ")
+						{
+							spawnOffsetMountedZ = std::stof(variableValueStr);
 						}
 					}
 					else if (currentSection == "CloseCombat")
@@ -264,20 +353,6 @@ namespace FalseEdgeVR {
 							equipGraceFrames = std::stoi(variableValueStr);
 						}
 					}
-					else if (currentSection == "WeaponScaling")
-					{
-						std::string variableName;
-						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
-
-						if (variableName == "Enabled")
-						{
-							weaponScalingEnabled = (std::stoi(variableValueStr) != 0);
-						}
-						else if (variableName == "GrabbedScale")
-						{
-							weaponGrabbedScale = std::stof(variableValueStr);
-						}
-					}
 				} 
 			}
 			_MESSAGE("Config loaded successfully.");
@@ -294,6 +369,14 @@ namespace FalseEdgeVR {
 				autoEquipGrabbedWeaponEnabled ? "true" : "false", autoEquipGrabbedWeaponDelay);
 			_MESSAGE("TriggerHold settings: UnequipDelay=%.3f",
 				triggerUnequipDelay);
+			_MESSAGE("IntentionalDrop settings: GripSpamThreshold=%d, GripSpamWindow=%.1f, DropProtectionDisableTime=%.1f",
+				gripSpamThreshold, gripSpamWindow, dropProtectionDisableTime);
+			_MESSAGE("WeaponLock settings: SpamThreshold=%d, SpamWindow=%.1f",
+				triggerSpamThreshold, triggerSpamWindow);
+			_MESSAGE("WeaponSpawn settings: Distance=%.1f, OffsetX=%.1f, OffsetY=%.1f, OffsetZ=%.1f",
+				spawnDistance, spawnOffsetX, spawnOffsetY, spawnOffsetZ);
+			_MESSAGE("WeaponSpawnMounted settings: OffsetX=%.1f, OffsetY=%.1f, OffsetZ=%.1f",
+				spawnOffsetMountedX, spawnOffsetMountedY, spawnOffsetMountedZ);
 			_MESSAGE("CloseCombat settings: EnterDistance=%.1f, ExitDistance=%.1f",
 				closeCombatEnterDistance, closeCombatExitDistance);
 			_MESSAGE("ShieldCollision settings:");
@@ -306,8 +389,6 @@ namespace FalseEdgeVR {
 			_MESSAGE("ShieldBash settings: Enabled=%s, BashThreshold=%d, BashWindow=%.1f, LockoutDuration=%.0f",
 				shieldBashEnabled ? "true" : "false", shieldBashThreshold, shieldBashWindow, shieldBashLockoutDuration);
 			_MESSAGE("General settings: EquipGraceFrames=%d", equipGraceFrames);
-			_MESSAGE("WeaponScaling settings: Enabled=%s, GrabbedScale=%.2f",
-				weaponScalingEnabled ? "true" : "false", weaponGrabbedScale);
 			return;
 		}
 		return;

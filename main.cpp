@@ -10,6 +10,7 @@
 #include "VRInputHandler.h"
 #include "WeaponGeometry.h"
 #include "ShieldCollision.h"
+#include "DaggerFlipTracker.h"
 #include "ActivateHook.h"
 #include "skse64/GameEvents.h"
 #include "skse64/GameMenus.h"
@@ -31,6 +32,7 @@ namespace FalseEdgeVR
 
 	// ============================================
 	// Menu Event Handler - Hot reload config on main menu close
+	// Also handles safe tracking pause during crafting/smithing menus
 	// ============================================
 	class MenuEventHandler : public BSTEventSink<MenuOpenCloseEvent>
 	{
@@ -40,25 +42,81 @@ namespace FalseEdgeVR
 			if (!evn)
 				return kEvent_Continue;
 
-			// Pause/resume VR tracking for any menu that pauses the game
-			// Use the menu flags via MenuManager to decide whether to pause tracking
+			// ============================================
+			// SAFE TRACKING: Check for dangerous menus by NAME
+			// These menus can cause CTD if HIGGS/VR tracking runs during them
+			// ============================================
+			static BSFixedString craftingMenu("Crafting Menu");
+			static BSFixedString raceSexMenu("RaceSex Menu");
+			static BSFixedString containerMenu("ContainerMenu");
+			static BSFixedString barterMenu("BarterMenu");
+			static BSFixedString giftMenu("GiftMenu");
+			static BSFixedString lockpickingMenu("Lockpicking Menu");
+			static BSFixedString bookMenu("Book Menu");
+			static BSFixedString sleepWaitMenu("Sleep/Wait Menu");
+			static BSFixedString loadingMenu("Loading Menu");
+			static BSFixedString journalMenu("Journal Menu");
+			static BSFixedString mapMenu("MapMenu");
+			static BSFixedString inventoryMenu("InventoryMenu");
+			static BSFixedString magicMenu("MagicMenu");
+			static BSFixedString favoritesMenu("FavoritesMenu");
+			static BSFixedString statsMenu("StatsMenu");
+			static BSFixedString trainingMenu("Training Menu");
+			
+			// Check if this is a dangerous menu that requires tracking pause
+			bool isDangerousMenu = (
+				evn->menuName == craftingMenu ||      // Smithing, Alchemy, Enchanting
+				evn->menuName == raceSexMenu ||       // Character creation
+				evn->menuName == containerMenu ||     // Containers
+				evn->menuName == barterMenu ||  // Trading
+				evn->menuName == giftMenu ||          // Gift giving
+				evn->menuName == lockpickingMenu ||   // Lockpicking
+				evn->menuName == bookMenu ||          // Reading books
+				evn->menuName == sleepWaitMenu ||     // Sleep/Wait
+				evn->menuName == loadingMenu ||       // Loading screen
+				evn->menuName == journalMenu ||       // Journal/Quest menu
+				evn->menuName == mapMenu ||           // Map
+				evn->menuName == inventoryMenu ||     // Inventory
+				evn->menuName == magicMenu ||   // Magic menu
+				evn->menuName == favoritesMenu ||     // Favorites
+				evn->menuName == statsMenu ||     // Stats/Perk menu
+				evn->menuName == trainingMenu         // Training menu
+			);
+
+			if (isDangerousMenu)
+			{
+				if (evn->opening)
+				{
+					_MESSAGE("MenuEventHandler: === PAUSING VR TRACKING === Menu: %s", evn->menuName.data);
+					VRInputHandler::GetSingleton()->PauseTracking(true);
+				}
+				else
+				{
+					_MESSAGE("MenuEventHandler: === RESUMING VR TRACKING === Menu: %s", evn->menuName.data);
+					VRInputHandler::GetSingleton()->PauseTracking(false);
+				}
+				
+				// Continue to check for other menu behaviors
+			}
+			
+			// FALLBACK: Also pause for any menu with kFlag_PausesGame that we didn't catch above
 			MenuManager* mm = MenuManager::GetSingleton();
-			if (mm)
+			if (mm && !isDangerousMenu)
 			{
 				IMenu* menu = mm->GetMenu(&evn->menuName);
 				if (menu)
 				{
-					bool pausesGame = (menu->flags & IMenu::kFlag_PausesGame) !=0;
+					bool pausesGame = (menu->flags & IMenu::kFlag_PausesGame) != 0;
 					if (pausesGame)
 					{
 						if (evn->opening)
 						{
-							_MESSAGE("MenuEventHandler: Pausing VR tracking due to menu open: %s", evn->menuName.data);
+							_MESSAGE("MenuEventHandler: Pausing VR tracking (flag) - Menu: %s", evn->menuName.data);
 							VRInputHandler::GetSingleton()->PauseTracking(true);
 						}
 						else
 						{
-							_MESSAGE("MenuEventHandler: Resuming VR tracking due to menu close: %s", evn->menuName.data);
+							_MESSAGE("MenuEventHandler: Resuming VR tracking (flag) - Menu: %s", evn->menuName.data);
 							VRInputHandler::GetSingleton()->PauseTracking(false);
 						}
 					}
@@ -266,11 +324,16 @@ namespace FalseEdgeVR
 		_MESSAGE("Calling InitializeWeaponGeometryTracker...");
 		InitializeWeaponGeometryTracker();
 		_MESSAGE("InitializeWeaponGeometryTracker complete");
-		
+
 		// Initialize shield collision tracking
 		_MESSAGE("Calling InitializeShieldCollisionTracker...");
 		InitializeShieldCollisionTracker();
 		_MESSAGE("InitializeShieldCollisionTracker complete");
+
+		// Initialize dagger flip tracking
+		_MESSAGE("Calling DaggerFlipTracker::Initialize...");
+		FalseEdgeVR::DaggerFlipTracker::GetSingleton()->Initialize();
+		_MESSAGE("DaggerFlipTracker::Initialize complete");
 		
 		// Update grab listening based on current equipment
 		_MESSAGE("Calling UpdateGrabListening...");

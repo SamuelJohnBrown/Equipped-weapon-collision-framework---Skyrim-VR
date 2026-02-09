@@ -77,7 +77,40 @@ namespace FalseEdgeVR
         // Register the trigger callback with PapyrusVR
         static void RegisterTriggerCallback();
    
-        // Get the velocity of a grabbed weapon (from geometry tracker)
+        // ============================================
+        // Grip Button Tracking
+   // ============================================
+   
+        // Check if grip is currently pressed
+        static bool IsLeftGripPressed();
+     static bool IsRightGripPressed();
+        
+        // Check if grip is held for the VR controller corresponding to a game hand
+        static bool IsGripHeldForGameHand(bool isLeftGameHand);
+      
+        // ============================================
+        // Drop Protection Override (Grip Spam Detection)
+        // ============================================
+        
+        // Check if drop protection is currently disabled for a VR controller
+        // (true = protection disabled, player can drop weapons freely)
+     static bool IsDropProtectionDisabled(bool isLeftVRController);
+    
+  // Get remaining time for drop protection disable (for debugging)
+  static float GetDropProtectionDisableTimeRemaining(bool isLeftVRController);
+        
+        // ============================================
+        // Weapon Lock (Trigger Spam Detection)
+        // ============================================
+        
+        // Check if weapon is locked to equipped state for a VR controller
+        // (true = weapon stays equipped even when trigger is released)
+        static bool IsWeaponLocked(bool isLeftVRController);
+        
+        // Clear weapon lock for a VR controller (call when weapon is dropped/unequipped)
+      static void ClearWeaponLock(bool isLeftVRController);
+ 
+     // Get the velocity of a grabbed weapon (from geometry tracker)
  float GetGrabbedWeaponVelocity(bool isLeftGameHand) const;
  
         // Track HIGGS collision state for grabbed weapons (left hand - blade vs blade)

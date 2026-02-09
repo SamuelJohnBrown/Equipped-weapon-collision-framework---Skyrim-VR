@@ -1,6 +1,7 @@
 #include "ActivateHook.h"
 #include "EquipManager.h"
 #include "Engine.h"
+#include "VRInputHandler.h"
 #include "config.h"
 #include "skse64/GameReferences.h"
 #include "skse64/GameRTTI.h"
@@ -8,6 +9,9 @@
 
 namespace FalseEdgeVR
 {
+    // Forward declaration from VRInputHandler.cpp
+    bool IsControllerInShoulderZone(bool isLeftVRController);
+    
     // ============================================
     // Globals
     // ============================================
@@ -34,26 +38,76 @@ namespace FalseEdgeVR
   TESObjectREFR* leftGrabbed = higgsInterface->GetGrabbedObject(true);
         TESObjectREFR* rightGrabbed = higgsInterface->GetGrabbedObject(false);
     
-      return (leftGrabbed == obj) || (rightGrabbed == obj);
+   return (leftGrabbed == obj) || (rightGrabbed == obj);
+  }
+  
+    // Get which VR controller is holding this object (returns true for left, false for right)
+    // Returns false if not held by either hand
+    bool GetHoldingVRController(TESObjectREFR* obj, bool& outIsLeftController)
+    {
+ if (!obj || !higgsInterface)
+   return false;
+        
+    TESObjectREFR* leftGrabbed = higgsInterface->GetGrabbedObject(true);
+    TESObjectREFR* rightGrabbed = higgsInterface->GetGrabbedObject(false);
+    
+    if (leftGrabbed == obj)
+        {
+outIsLeftController = true;
+ return true;
+        }
+   else if (rightGrabbed == obj)
+   {
+       outIsLeftController = false;
+            return true;
+        }
+      
+        return false;
     }
     
     bool ShouldBlockActivation(TESObjectREFR* activatee, TESObjectREFR* activator)
     {
         // Only block player activations
         PlayerCharacter* player = *g_thePlayer;
-        if (!player || activator != player)
+ if (!player || activator != player)
     return false;
      
    // Only block if the object is grabbed by HIGGS
         if (!IsObjectGrabbedByHiggs(activatee))
-        return false;
-        
+   return false;
+ 
         // Only block if it's a weapon
         if (!activatee->baseForm || activatee->baseForm->formType != kFormType_Weapon)
-      return false;
+return false;
         
-     // Check if this grabbed weapon is from our trigger system (dropped weapon refs)
-        // If so, ALWAYS block - the player uses trigger to equip, not activate
+        // ============================================
+// CHECK DROP PROTECTION OVERRIDE
+// If player spammed grip, allow the drop
+// ============================================
+        bool isLeftVRController = false;
+        if (GetHoldingVRController(activatee, isLeftVRController))
+        {
+            if (VRInputHandler::IsDropProtectionDisabled(isLeftVRController))
+            {
+                _MESSAGE("ShouldBlockActivation: Drop protection DISABLED for %s VR controller - allowing drop",
+                    isLeftVRController ? "LEFT" : "RIGHT");
+                return false;  // Don't block - player wants to drop
+            }
+
+            // ============================================
+            // CHECK SHOULDER ZONE
+            // If controller is in shoulder zone, allow activation (holstering)
+            // ============================================
+            if (IsControllerInShoulderZone(isLeftVRController))
+            {
+                _MESSAGE("ShouldBlockActivation: %s VR controller is in SHOULDER ZONE - allowing activation (holster)",
+                    isLeftVRController ? "LEFT" : "RIGHT");
+                return false;  // Don't block - player is holstering
+            }
+        }
+     
+        // Check if this grabbed weapon is from our trigger system (dropped weapon refs)
+     // If so, ALWAYS block - the player uses trigger to equip, not activate
         TESObjectREFR* droppedLeft = EquipManager::GetSingleton()->GetDroppedWeaponRef(true);
       TESObjectREFR* droppedRight = EquipManager::GetSingleton()->GetDroppedWeaponRef(false);
         
@@ -61,7 +115,7 @@ namespace FalseEdgeVR
         {
      _MESSAGE("ShouldBlockActivation: Weapon is from trigger system - blocking activation");
  return true;  // Block - this weapon is managed by our trigger system
-        }
+   }
         
     // Check if EITHER hand has a weapon equipped (legacy check)
     const PlayerEquipState& equipState = EquipManager::GetSingleton()->GetEquipState();
