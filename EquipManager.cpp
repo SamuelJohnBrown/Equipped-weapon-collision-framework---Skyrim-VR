@@ -1,7 +1,7 @@
-#include "EquipManager.h"
+﻿#include "EquipManager.h"
+#include "config.h"
 #include "VRInputHandler.h"
 #include "Engine.h"
-#include "ShieldCollision.h"
 #include "SkyrimVRESLAPI.h"
 #include "ActivateHook.h"
 #include "skse64/GameData.h"
@@ -15,7 +15,7 @@
 #include <unordered_map>
 #include <mutex>
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
     extern SKSETaskInterface* g_task;
 
@@ -90,6 +90,101 @@ namespace FalseEdgeVR
             delete this;
         }
     };
+
+    // ============================================
+    // Scheduled Force Re-equip Task (runs on game thread)
+    // Used by the trigger-held re-equip path. SafeActivate() puts the
+    // grabbed weapon into inventory, but the pickup is not always
+    // processed by the time ForceReequipHand() runs on the same frame
+    // (and PollTriggerState runs in HIGGS's pre-physics callback, not
+    // the game thread). Equipping too early silently fails and the
+    // weapon "disappears" into the inventory.
+    // This task runs on the game thread and waits (retrying once per
+    // frame) until the item is actually present in the player's
+    // inventory before calling ForceReequipHand().
+    // ============================================
+    class ScheduledForceReequipTask : public TaskDelegate
+    {
+    public:
+        bool m_isLeftHand;
+        int m_retriesLeft;
+
+        ScheduledForceReequipTask(bool isLeftHand, int retriesLeft)
+            : m_isLeftHand(isLeftHand), m_retriesLeft(retriesLeft) {}
+
+        virtual void Run() override
+        {
+            EquipManager* manager = EquipManager::GetSingleton();
+
+            UInt32 cachedFormID = manager->GetCachedWeaponFormID(m_isLeftHand);
+            if (cachedFormID == 0)
+            {
+                // Cache was cleared (death/load/ClearAllState) - nothing to equip
+                _MESSAGE("[ScheduledForceReequip] No cached FormID for %s hand - aborting", m_isLeftHand ? "LEFT" : "RIGHT");
+                return;
+            }
+
+            PlayerCharacter* player = *g_thePlayer;
+            TESForm* weaponForm = LookupFormByID(cachedFormID);
+
+            if (player && weaponForm)
+            {
+                // Check if the activated item has arrived in the player's inventory yet
+                bool itemInInventory = false;
+                ExtraContainerChanges* containerChanges = static_cast<ExtraContainerChanges*>(
+                    player->extraData.GetByType(kExtraData_ContainerChanges));
+                if (containerChanges && containerChanges->data)
+                {
+                    InventoryEntryData* entryData = containerChanges->data->FindItemEntry(weaponForm);
+                    if (entryData && entryData->countDelta > 0)
+                        itemInInventory = true;
+                }
+
+                if (!itemInInventory && m_retriesLeft > 0)
+                {
+                    // Pickup not processed yet - try again next frame
+                    if (g_task)
+                    {
+                        g_task->AddTask(new ScheduledForceReequipTask(m_isLeftHand, m_retriesLeft - 1));
+                        return;
+                    }
+                }
+
+                if (!itemInInventory)
+                {
+                    _MESSAGE("[ScheduledForceReequip] WARNING: Item %08X never appeared in inventory - attempting equip anyway", cachedFormID);
+                }
+            }
+
+            // Item is in inventory (or retries exhausted) - do the real equip
+            EquipManager::s_suppressDrawSound = true;
+            manager->ForceReequipHand(m_isLeftHand);
+            EquipManager::s_suppressDrawSound = false;
+        }
+
+        virtual void Dispose() override
+        {
+            delete this;
+        }
+    };
+
+    void EquipManager::ScheduleForceReequip(bool isLeftHand)
+    {
+        if (g_task)
+        {
+            // ~12 retries at one per frame = up to ~130ms grace for the pickup to process
+            g_task->AddTask(new ScheduledForceReequipTask(isLeftHand, 12));
+            _MESSAGE("EquipManager: Scheduled force re-equip for %s hand (game thread, waits for inventory)", isLeftHand ? "LEFT" : "RIGHT");
+        }
+        else
+        {
+            // Fallback: previous behavior (immediate equip)
+            _MESSAGE("EquipManager: g_task unavailable - falling back to immediate re-equip for %s hand", isLeftHand ? "LEFT" : "RIGHT");
+            s_suppressDrawSound = true;
+            ForceReequipHand(isLeftHand);
+            s_suppressDrawSound = false;
+        }
+    }
 
     // ============================================
     // Thread function to delay then queue the equip task
@@ -467,281 +562,6 @@ EquipManager::GetSingleton()->OnEquip(item, actor, isLeftHand);
      LogEquipmentState();
     }
 
-  // Check if a weapon is from Interactive Pipe Smoking VR mod and should be excluded from draw sounds
-    // Returns true if the weapon should NOT play a draw sound
-    static bool IsPipeSmokingWeapon(UInt32 weaponFormID)
-    {
-        // Check if Interactive_Pipe_Smoking_VR.esp is loaded
-        static bool checkedForMod = false;
-    static bool modIsLoaded = false;
-        static UInt8 modIndex = 0;
-        
-        if (!checkedForMod)
- {
-     checkedForMod = true;
-      DataHandler* dataHandler = DataHandler::GetSingleton();
-   if (dataHandler)
-            {
-         const ModInfo* modInfo = dataHandler->LookupModByName("Interactive_Pipe_Smoking_VR.esp");
-                if (modInfo && modInfo->IsActive())
-    {
-         modIsLoaded = true;
-         modIndex = modInfo->GetPartialIndex();
-        _MESSAGE("EquipManager: Interactive_Pipe_Smoking_VR.esp detected (index: %02X) - pipe weapons will be excluded from draw sounds", modIndex);
-      }
-            }
-     }
-        
-        // If mod is not loaded, don't exclude anything
-        if (!modIsLoaded)
-         return false;
-        
-        // Get the mod index from the weapon's FormID
-        UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
-        
-        // Check if the weapon is from the pipe smoking mod
-        if (weaponModIndex != modIndex)
-            return false;
-        
-        // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
-        // For ESL plugins, the format is FExxxYYY where xxx is the light plugin index
-        UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
-    
-        // If it's an ESL (FE prefix), get the actual base ID
-        if ((weaponFormID >> 24) == 0xFE)
-     {
-            baseFormID = weaponFormID & 0x00000FFF;
-        }
-        
-    // List of pipe smoking weapon base FormIDs to exclude:
-        // 0x000804, 0x00080A, 0x000810, 0x000817, 0x005902, 0x014C0A, 0x014C2E, 0x014C34
- switch (baseFormID)
-     {
-       case 0x000804:
-  case 0x00080A:
-  case 0x000810:
- case 0x000817:
-            case 0x005902:
-       case 0x014C0A:
-  case 0x014C2E:
-     case 0x014C34:
-        _MESSAGE("EquipManager: Weapon %08X is a pipe smoking item - skipping sound", weaponFormID);
-       return true;
-     default:
-      return false;
-        }
-    }
-
-    // Check if a weapon is from Navigate VR mod and should be excluded from sounds
-    // Returns true if the weapon should NOT play sounds
-    static bool IsNavigateVRWeapon(UInt32 weaponFormID)
-    {
-        // Check if Navigate VR - Equipable Dynamic Compass and Maps.esp is loaded
-        static bool checkedForMod = false;
-   static bool modIsLoaded = false;
-    static UInt8 modIndex = 0;
- 
-        if (!checkedForMod)
-        {
-  checkedForMod = true;
-  DataHandler* dataHandler = DataHandler::GetSingleton();
-          if (dataHandler)
-   {
-   const ModInfo* modInfo = dataHandler->LookupModByName("Navigate VR - Equipable Dynamic Compass and Maps.esp");
-  if (modInfo && modInfo->IsActive())
-  {
-     modIsLoaded = true;
-         modIndex = modInfo->GetPartialIndex();
-   _MESSAGE("EquipManager: Navigate VR mod detected (index: %02X) - map/compass items will be excluded from sounds", modIndex);
-        }
-            }
-        }
- 
- // If mod is not loaded, don't exclude anything
-if (!modIsLoaded)
- return false;
-
-        // Get the mod index from the weapon's FormID
-      UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
-        
-        // Check if the weapon is from the Navigate VR mod
-     if (weaponModIndex != modIndex)
-      return false;
-      
-        // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
-    UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
-   
-  // List of Navigate VR weapon base FormIDs to exclude:
- // 0x0e09d, 0x37482, 0x6ed71, 0xbdcea
-        switch (baseFormID)
-     {
-   case 0x00e09d:
-  case 0x037482:
-        case 0x06ed71:
-            case 0x0bdcea:
- _MESSAGE("EquipManager: Weapon %08X is a Navigate VR item - skipping sound", weaponFormID);
-    return true;
-       default:
-        return false;
-   }
-    }
-
-    // Check if a weapon is a bound weapon from Skyrim.esm that should be excluded
-    // These are the specific bound weapon records that need to be excluded from all logic
-    // Returns true if the weapon should NOT be tracked
-    static bool IsBoundWeapon(UInt32 weaponFormID)
-    {
-        // Get the mod index from the weapon's FormID
-        UInt8 modIndex = (weaponFormID >> 24) & 0xFF;
- 
-  // Bound weapons are in Skyrim.esm which is always index 0x00
-   if (modIndex != 0x00)
-  return false;
-
-        // Get the base FormID (lower 24 bits)
-        UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
-  
-    // List of bound weapon FormIDs from Skyrim.esm to exclude:
-     // 0x00058f5e - Bound Sword
-        // 0x000424f7 - Bound Battleaxe  
-     // 0x00058f5f - Bound Bow
-    // 0x000424f9 - Bound Dagger
-     // 0x000ba30e - Bound Sword (different variant)
-        switch (baseFormID)
-        {
-         case 0x00058f5e:  // Bound Sword
-            case 0x000424f7:  // Bound Battleaxe
-    case 0x00058f5f:  // Bound Bow
-     case 0x000424f9:  // Bound Dagger
-     case 0x000ba30e:  // Bound Sword variant
-   _MESSAGE("EquipManager: Weapon %08X is a Bound Weapon - excluding from tracking", weaponFormID);
-       return true;
-  default:
-      return false;
-        }
-    }
-
-    // Check if a weapon is from iNeed Water VR mod and should be excluded
-    // Returns true if the weapon should NOT be tracked (waterskins, etc.),
-    static bool IsINeedWaterVRWeapon(UInt32 weaponFormID)
-    {
-    // Check if iNeedWaterVR.esp is loaded
-        static bool checkedForMod = false;
-        static bool modIsLoaded = false;
-        static UInt8 modIndex = 0;
-        
-        if (!checkedForMod)
-  {
-       checkedForMod = true;
- DataHandler* dataHandler = DataHandler::GetSingleton();
-     if (dataHandler)
-      {
-    const ModInfo* modInfo = dataHandler->LookupModByName("iNeedWaterVR.esp");
- if (modInfo && modInfo->IsActive())
-   {
-   modIsLoaded = true;
-          modIndex = modInfo->GetPartialIndex();
-    _MESSAGE("EquipManager: iNeedWaterVR.esp detected (index: %02X) - waterskin items will be excluded from tracking", modIndex);
-      }
-  }
-  }
- 
- // If mod is not loaded, don't exclude anything
-        if (!modIsLoaded)
-     return false;
-        
-      // Get the mod index from the weapon's FormID
-      UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
-        
-     // Check if the weapon is from the iNeed Water VR mod
-  if (weaponModIndex != modIndex)
-     return false;
-
-     // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
- UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
-   
-     // If it's an ESL (FE prefix), get the actual base ID
-        if ((weaponFormID >> 24) == 0xFE)
-     {
-        baseFormID = weaponFormID & 0x00000FFF;
-        }
-        
-   // List of iNeed Water VR weapon base FormIDs to exclude:
-     // 0x005902 - Waterskin
-     switch (baseFormID)
-        {
-   case 0x005902:// Waterskin
-        _MESSAGE("EquipManager: Weapon %08X is an iNeed Water VR item (waterskin) - excluding from tracking", weaponFormID);
-       return true;
-default:
-         return false;
-     }
-}
-
-    // Check if a weapon is from VR Immersive Smithing mod and should be excluded
-    // Returns true if the weapon should NOT be tracked (smithing tools, etc.),
-    static bool IsVRImmersiveSmithingWeapon(UInt32 weaponFormID)
-    {
-        // Check if VR_ImmersiveSmithing.esp is loaded
-        static bool checkedForMod = false;
-        static bool modIsLoaded = false;
-        static UInt8 modIndex = 0;
-        
-        if (!checkedForMod)
-        {
- checkedForMod = true;
-         DataHandler* dataHandler = DataHandler::GetSingleton();
-         if (dataHandler)
-            {
-   const ModInfo* modInfo = dataHandler->LookupModByName("VR_ImmersiveSmithing.esp");
-    if (modInfo && modInfo->IsActive())
-           {
-       modIsLoaded = true;
-modIndex = modInfo->GetPartialIndex();
-     _MESSAGE("EquipManager: VR_ImmersiveSmithing.esp detected (index: %02X) - smithing tools will be excluded from tracking", modIndex);
-     }
-            }
-        }
-        
-        // If mod is not loaded, don't exclude anything
-        if (!modIsLoaded)
-            return false;
-     
-        // Get the mod index from the weapon's FormID
-        UInt8 weaponModIndex = (weaponFormID >> 24) & 0xFF;
-   
-      // Check if the weapon is from the VR Immersive Smithing mod
- if (weaponModIndex != modIndex)
-   return false;
-    
-        // Get the base FormID (lower 24 bits for regular plugins, lower 12 bits for ESL)
-        UInt32 baseFormID = weaponFormID & 0x00FFFFFF;
-        
-        // If it's an ESL (FE prefix), get the actual base ID
-        if ((weaponFormID >> 24) == 0xFE)
-        {
-         baseFormID = weaponFormID & 0x00000FFF;
-    }
- 
-      // List of VR Immersive Smithing weapon base FormIDs to exclude:
-      // 0x005901 - Smithing tool
-        switch (baseFormID)
-        {
-    case 0x005901:  // Smithing tool
-  _MESSAGE("EquipManager: Weapon %08X is a VR Immersive Smithing item - excluding from tracking", weaponFormID);
-  return true;
-  default:
- return false;
-      }
- }
-
-    // Combined check for items that should be completely excluded from weapon handling
-    // (Pipe Smoking VR items, Navigate VR, Bound Weapons, iNeed Water VR, VR Immersive Smithing, etc.)
-    static bool IsExcludedItem(UInt32 formID)
-    {
-  return IsPipeSmokingWeapon(formID) || IsNavigateVRWeapon(formID) || IsBoundWeapon(formID) || IsINeedWaterVRWeapon(formID) || IsVRImmersiveSmithingWeapon(formID);
-    }
-
     void EquipManager::OnEquip(TESForm* item, Actor* actor, bool isLeftHand)
     {
       if (!item)
@@ -835,7 +655,7 @@ modIndex = modInfo->GetPartialIndex();
    }
         
         // Log specific weapon types and play draw sounds (unless suppressed by collision logic or excluded weapons)
-    bool shouldExclude = IsExcludedItem(item->formID);
+    bool shouldExclude = IsExcludedWeaponFormID(item->formID);
         
       // Check draw sound cooldown (5 seconds from last unequip of same weapon)
      bool onDrawCooldown = false;
@@ -941,7 +761,7 @@ modIndex = modInfo->GetPartialIndex();
      }
         
         // Check if this weapon should be excluded from sounds
-        bool shouldExclude = IsExcludedItem(item->formID);
+        bool shouldExclude = IsExcludedWeaponFormID(item->formID);
         
   // Check sheath sound cooldown (5 seconds from last equip of same weapon)
  bool onSheathCooldown = false;
@@ -1091,9 +911,8 @@ case WeaponType::Mace:
         if (!form)
   return false;
 
-        // Exclude items from mods that should never be treated as weapons
-   // (Pipe Smoking VR, Navigate VR, etc.)
-     if (IsExcludedItem(form->formID))
+        // Exclude items listed in TwinGripVR.ini [WeaponExclusions]
+     if (IsExcludedWeaponFormID(form->formID))
          return false;
 
         if (form->formType != kFormType_Weapon)
@@ -1873,13 +1692,19 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
         }
 
  // Store the reference (by GAME hand)
+ // Also store RefID + base FormID so the world copy can be safely
+ // cleaned up later even if the pointer goes stale (save/load)
  if (isLeftGameHand)
    {
       m_droppedWeaponLeft = droppedWeapon;
+      m_droppedWeaponRefIDLeft = droppedWeapon->formID;
+      m_droppedWeaponBaseIDLeft = item->formID;
  }
      else
           {
    m_droppedWeaponRight = droppedWeapon;
+   m_droppedWeaponRefIDRight = droppedWeapon->formID;
+   m_droppedWeaponBaseIDRight = item->formID;
        }
 
             // Step 4: Use HIGGS to grab the object
@@ -1940,11 +1765,57 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
         if (isLeftHand)
     {
           m_droppedWeaponLeft = nullptr;
+          m_droppedWeaponRefIDLeft = 0;
+          m_droppedWeaponBaseIDLeft = 0;
      }
         else
    {
  m_droppedWeaponRight = nullptr;
+ m_droppedWeaponRefIDRight = 0;
+ m_droppedWeaponBaseIDRight = 0;
     }
+    }
+
+    void EquipManager::CleanupOrphanedDuplicates()
+    {
+        for (int h = 0; h < 2; h++)
+        {
+            bool isLeftHand = (h == 0);
+            UInt32 refID = isLeftHand ? m_droppedWeaponRefIDLeft : m_droppedWeaponRefIDRight;
+            UInt32 baseID = isLeftHand ? m_droppedWeaponBaseIDLeft : m_droppedWeaponBaseIDRight;
+            bool wasDualSame = isLeftHand ? m_wasDualWieldingSameWeaponLeft : m_wasDualWieldingSameWeaponRight;
+
+            // Only the dual-wield same-weapon case leaves a +1 duplicate behind
+            // (normal case already removed the inventory original at spawn time)
+            if (refID == 0 || !wasDualSame)
+                continue;
+
+            // Look the reference up fresh by RefID - never trust the stale pointer.
+            // Returns null if the object no longer exists (e.g. not in the loaded save).
+            TESForm* form = LookupFormByID(refID);
+            TESObjectREFR* ref = form ? DYNAMIC_CAST(form, TESForm, TESObjectREFR) : nullptr;
+
+            // Verify it's still OUR spawned weapon copy before deleting
+            if (ref && ref->baseForm && ref->baseForm->formID == baseID)
+            {
+                _MESSAGE("EquipManager: Deleting orphaned dual-wield duplicate (RefID: %08X, Base: %08X, %s hand)",
+                    refID, baseID, isLeftHand ? "LEFT" : "RIGHT");
+                DeleteWorldObject(ref);
+            }
+
+            if (isLeftHand)
+            {
+                m_droppedWeaponRefIDLeft = 0;
+                m_droppedWeaponBaseIDLeft = 0;
+                m_wasDualWieldingSameWeaponLeft = false;
+            }
+            else
+            {
+                m_droppedWeaponRefIDRight = 0;
+                m_droppedWeaponBaseIDRight = 0;
+                m_wasDualWieldingSameWeaponRight = false;
+            }
+        }
     }
 
     void EquipManager::ClearCachedWeaponFormID(bool isLeftHand)
@@ -2078,8 +1949,8 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
           return kEvent_Continue;
      }
         
-     // Skip pickup sound for excluded items (pipe smoking, navigate VR, etc.)
-   if (IsExcludedItem(evn->itemFormId))
+     // Skip pickup sound for excluded items (see TwinGripVR.ini [WeaponExclusions])
+   if (IsExcludedWeaponFormID(evn->itemFormId))
         {
          _MESSAGE("EquipManager: Skipping pickup sound (excluded item)");
    return kEvent_Continue;

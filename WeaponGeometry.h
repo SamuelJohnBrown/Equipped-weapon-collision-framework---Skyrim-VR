@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "skse64/NiNodes.h"
 #include "skse64/NiObjects.h"
@@ -8,7 +8,7 @@
 #include "config.h"
 #include "EquipManager.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
     // Represents the blade geometry data for a weapon
     struct BladeGeometry
@@ -113,12 +113,6 @@ int raycastHitCount;            // Number of rays that detected collision
   BladeGeometry rightHand;
     };
 
-    // Callback type for blade collision events
-    typedef void (*BladeCollisionCallback)(const BladeCollisionResult& collision);
-    
-    // Callback type for imminent collision events (about to collide)
-    typedef void (*BladeImminentCallback)(const BladeCollisionResult& collision);
-
     // Tracks weapon geometry (blade tip/base positions) each frame
     class WeaponGeometryTracker
     {
@@ -130,9 +124,6 @@ int raycastHitCount;            // Number of rays that detected collision
   
         // Update weapon geometry - call this each frame
     void Update(float deltaTime);
-        
-      // Get current geometry state
-        const WeaponGeometryState& GetGeometryState() const { return m_geometryState; }
         
         // Get blade geometry for a specific hand
         const BladeGeometry& GetBladeGeometry(bool isLeftHand) const;
@@ -152,32 +143,6 @@ int raycastHitCount;            // Number of rays that detected collision
         
         // Check if blades are colliding and get collision info
   bool CheckBladeCollision(BladeCollisionResult& outResult);
-      
-        // Get the last collision result
-  const BladeCollisionResult& GetLastCollisionResult() const { return m_lastCollision; }
-        
-        // Check if blades are currently in contact
-        bool AreBladesInContact() const { return m_bladesInContact; }
- 
-        // Check if collision is imminent (close but not touching)
-  bool IsCollisionImminent() const { return m_collisionImminent; }
-        
-        // Check if blades are grinding (sustained contact)
-      bool AreBladesGrinding() const { return m_bladesGrinding; }
-        
-   // Set collision threshold distance (default ~5 units)
-        void SetCollisionThreshold(float threshold) { m_collisionThreshold = threshold; }
-        float GetCollisionThreshold() const { return m_collisionThreshold; }
-        
-   // Set imminent collision threshold (default ~15 units)
-   void SetImminentThreshold(float threshold) { m_imminentThreshold = threshold; }
- float GetImminentThreshold() const { return m_imminentThreshold; }
-        
-   // Register callback for blade collision events
-        void SetCollisionCallback(BladeCollisionCallback callback) { m_collisionCallback = callback; }
-  
-   // Register callback for imminent collision events
-        void SetImminentCallback(BladeImminentCallback callback) { m_imminentCallback = callback; }
         
     private:
         WeaponGeometryTracker() = default;
@@ -196,9 +161,6 @@ WeaponGeometryTracker(const WeaponGeometryTracker&) = delete;
         
         // Get the appropriate weapon offset node name
         const char* GetWeaponOffsetNodeName(bool isLeftHand);
-        
-        // Log geometry state for debugging
-     void LogGeometryState();
         
       // ============================================
         // Raycasting Collision Detection
@@ -272,9 +234,6 @@ bool RayIntersectsCylinder(
         static NiPoint3 PointAlongSegment(const NiPoint3& start, const NiPoint3& end, float t);
         
     WeaponGeometryState m_geometryState;
-        BladeCollisionResult m_lastCollision;
-        BladeCollisionCallback m_collisionCallback = nullptr;
-        BladeImminentCallback m_imminentCallback = nullptr;
         
     bool m_initialized = false;
         bool m_bladesInContact = false;

@@ -1,9 +1,9 @@
-#pragma once
+﻿#pragma once
 
 #include "Helper.h"
 #include "skse64/PluginAPI.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
 	extern SKSETrampolineInterface* g_trampolineInterface;
 	extern HiggsPluginAPI::IHiggsInterface001* higgsInterface;

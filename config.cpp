@@ -1,6 +1,73 @@
-#include "config.h"
+﻿#include "config.h"
+#include "skse64/GameData.h"
 
-namespace FalseEdgeVR {
+namespace TwinGripVR {
+
+	static UInt32 ParseHexFormID(const std::string& value)
+	{
+		if (value.empty())
+			return 0;
+
+		std::string hex = value;
+		if (hex.size() >= 2 && (hex[0] == '0' && (hex[1] == 'x' || hex[1] == 'X')))
+			hex = hex.substr(2);
+
+		try
+		{
+			return static_cast<UInt32>(std::stoul(hex, nullptr, 16));
+		}
+		catch (...)
+		{
+			return 0;
+		}
+	}
+
+	std::vector<WeaponExclusionEntry> weaponExclusionEntries;
+
+	bool IsExcludedWeaponFormID(UInt32 formID)
+	{
+		if (formID == 0)
+			return false;
+
+		UInt8 weaponModIndex = (formID >> 24) & 0xFF;
+		UInt32 weaponBaseFormID = formID & 0x00FFFFFF;
+		if (weaponModIndex == 0xFE)
+			weaponBaseFormID = formID & 0x00000FFF;
+
+		for (const WeaponExclusionEntry& entry : weaponExclusionEntries)
+		{
+			if (entry.formID == 0)
+				continue;
+
+			if (entry.pluginName.empty())
+			{
+				if (formID == entry.formID)
+					return true;
+				continue;
+			}
+
+			DataHandler* dataHandler = DataHandler::GetSingleton();
+			if (!dataHandler)
+				continue;
+
+			const ModInfo* modInfo = dataHandler->LookupModByName(entry.pluginName.c_str());
+			if (!modInfo || !modInfo->IsActive())
+				continue;
+
+			UInt8 modIndex = modInfo->GetPartialIndex();
+			if (weaponModIndex != modIndex)
+				continue;
+
+			UInt32 entryBaseFormID = entry.formID & 0x00FFFFFF;
+			if (modIndex == 0xFE)
+				entryBaseFormID = entry.formID & 0x00000FFF;
+
+			if (weaponBaseFormID == entryBaseFormID)
+				return true;
+		}
+
+		return false;
+	}
 		
 	int logging = 2;  // Default to INFO level
 	int leftHandedMode = 0;
@@ -9,11 +76,8 @@ namespace FalseEdgeVR {
 	float bladeCollisionThreshold = 5.0f;       // Distance at which blades are considered touching
 	float bladeImminentThreshold = 25.0f;       // Distance at which collision is imminent (triggers unequip)
 	float bladeImminentThresholdBackup = 30.0f; // Backup threshold, larger than primary
-	float bladeReequipThreshold = 35.0f;        // Distance required before re-equipping weapon
-	float bladeCollisionTimeout = 0.9f;       // Time (seconds) without collision before considered separated
 	float bladeTimeToCollisionThreshold = 0.15f; // Time-based collision prediction threshold (150ms)
 	float bladeReequipCooldown = 0.5f;          // Cooldown after re-equip (500ms)
-	float reequipDelay = 0.002f;      // Delay after activating weapon before equipping (2ms)
 	float swingVelocityThreshold = 150.0f;      // Swing velocity threshold (units per second)
 	
 	// Auto-equip grabbed weapon settings
@@ -47,22 +111,6 @@ namespace FalseEdgeVR {
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	int collisionAvoidanceHand = 0;             // Default: left hand gets unequipped/grabbed during dual-wield collision
 
-	// Close combat settings
-	float closeCombatEnterDistance = 70.0f;     // Enter close combat mode at 70 units (~1 meter)
-	float closeCombatExitDistance = 90.0f;      // Exit close combat mode at 90 units (buffer to prevent rapid switching)
-
-	// Shield collision settings - defaults same as blade collision
-	float shieldCollisionThreshold = 5.0f;       // Distance at which weapon is considered touching shield
-	float shieldImminentThreshold = 25.0f; // Distance at which collision is imminent (triggers unequip)
-	float shieldImminentThresholdBackup = 30.0f; // Backup threshold, larger safety net
-	float shieldReequipThreshold = 35.0f;        // Distance required before re-equipping weapon
-	float shieldCollisionTimeout = 0.9f;         // Time (seconds) without collision before considered separated
-	float shieldTimeToCollisionThreshold = 0.15f; // Time-based collision prediction threshold (150ms)
-	float shieldReequipCooldown = 0.5f;  // Cooldown after re-equip (500ms)
-	float shieldReequipDelay = 0.002f;           // Delay after activating weapon before equipping (2ms)
-	float shieldSwingVelocityThreshold = 150.0f; // Swing velocity threshold (units per second)
-	float shieldRadius = 15.0f;                // Shield face detection radius (units)
-
 	// Shield bash settings - defaults
 	bool shieldBashEnabled = true;   // Enable/disable shield bash tracking feature
 	int shieldBashThreshold = 3;   // Number of bashes required to trigger effect
@@ -74,11 +122,13 @@ namespace FalseEdgeVR {
 
 	void loadConfig() 
 	{
+		weaponExclusionEntries.clear();
+
 		std::string runtimeDirectory = GetRuntimeDirectory();
 
 		if (!runtimeDirectory.empty()) 
 		{
-			std::string filepath = runtimeDirectory + "Data\\SKSE\\Plugins\\FalseEdgeVR.ini";
+			std::string filepath = runtimeDirectory + "Data\\SKSE\\Plugins\\TwinGripVR.ini";
 			std::ifstream file(filepath);
 
 			if (!file.is_open()) 
@@ -136,14 +186,6 @@ namespace FalseEdgeVR {
 						{
 							bladeImminentThresholdBackup = std::stof(variableValueStr);
 						}
-						else if (variableName == "ReequipThreshold")
-						{
-							bladeReequipThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "CollisionTimeout")
-						{
-							bladeCollisionTimeout = std::stof(variableValueStr);
-						}
 						else if (variableName == "TimeToCollisionThreshold")
 						{
 							bladeTimeToCollisionThreshold = std::stof(variableValueStr);
@@ -151,10 +193,6 @@ namespace FalseEdgeVR {
 						else if (variableName == "ReequipCooldown")
 						{
 							bladeReequipCooldown = std::stof(variableValueStr);
-						}
-						else if (variableName == "ReequipDelay")
-						{
-							reequipDelay = std::stof(variableValueStr);
 						}
 						else if (variableName == "SwingVelocityThreshold")
 						{
@@ -261,66 +299,6 @@ namespace FalseEdgeVR {
 							spawnOffsetMountedZ = std::stof(variableValueStr);
 						}
 					}
-					else if (currentSection == "CloseCombat")
-					{
-						std::string variableName;
-						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
-
-						if (variableName == "EnterDistance")
-						{
-							closeCombatEnterDistance = std::stof(variableValueStr);
-						}
-						else if (variableName == "ExitDistance")
-						{
-							closeCombatExitDistance = std::stof(variableValueStr);
-						}
-					}
-					else if (currentSection == "ShieldCollision")
-					{
-						std::string variableName;
-						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
-
-						if (variableName == "CollisionThreshold")
-						{
-							shieldCollisionThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "ImminentThreshold")
-						{
-							shieldImminentThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "ImminentThresholdBackup")
-						{
-							shieldImminentThresholdBackup = std::stof(variableValueStr);
-						}
-						else if (variableName == "ReequipThreshold")
-						{
-							shieldReequipThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "CollisionTimeout")
-						{
-							shieldCollisionTimeout = std::stof(variableValueStr);
-						}
-						else if (variableName == "TimeToCollisionThreshold")
-						{
-							shieldTimeToCollisionThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "ReequipCooldown")
-						{
-							shieldReequipCooldown = std::stof(variableValueStr);
-						}
-						else if (variableName == "ReequipDelay")
-						{
-							shieldReequipDelay = std::stof(variableValueStr);
-						}
-						else if (variableName == "SwingVelocityThreshold")
-						{
-							shieldSwingVelocityThreshold = std::stof(variableValueStr);
-						}
-						else if (variableName == "ShieldRadius")
-						{
-							shieldRadius = std::stof(variableValueStr);
-						}
-					}
 					else if (currentSection == "ShieldBash")
 					{
 						std::string variableName;
@@ -353,16 +331,41 @@ namespace FalseEdgeVR {
 							equipGraceFrames = std::stoi(variableValueStr);
 						}
 					}
+					else if (currentSection == "WeaponExclusions")
+					{
+						// LocalFormID=Plugin.esp  or  FullFormID (no plugin)
+						size_t equalsPos = line.find('=');
+						WeaponExclusionEntry entry;
+
+						if (equalsPos == std::string::npos)
+						{
+							entry.formID = ParseHexFormID(line);
+							if (entry.formID == 0)
+								continue;
+						}
+						else
+						{
+							std::string formIdStr = line.substr(0, equalsPos);
+							std::string pluginName = line.substr(equalsPos + 1);
+							trim(formIdStr);
+							trim(pluginName);
+							entry.formID = ParseHexFormID(formIdStr);
+							entry.pluginName = pluginName;
+							if (entry.formID == 0)
+								continue;
+						}
+
+						weaponExclusionEntries.push_back(entry);
+					}
 				} 
 			}
+
 			_MESSAGE("Config loaded successfully.");
 			_MESSAGE("BladeCollision settings:");
 			_MESSAGE("  CollisionThreshold=%.2f, ImminentThreshold=%.2f, ImminentThresholdBackup=%.2f",
 				bladeCollisionThreshold, bladeImminentThreshold, bladeImminentThresholdBackup);
-			_MESSAGE("  ReequipThreshold=%.2f, CollisionTimeout=%.3f, TimeToCollisionThreshold=%.3f",
-				bladeReequipThreshold, bladeCollisionTimeout, bladeTimeToCollisionThreshold);
-			_MESSAGE("  ReequipCooldown=%.3f, ReequipDelay=%.4f, SwingVelocityThreshold=%.1f",
-				bladeReequipCooldown, reequipDelay, swingVelocityThreshold);
+			_MESSAGE("  TimeToCollisionThreshold=%.3f, ReequipCooldown=%.3f, SwingVelocityThreshold=%.1f",
+				bladeTimeToCollisionThreshold, bladeReequipCooldown, swingVelocityThreshold);
 			_MESSAGE("  CollisionAvoidanceHand=%d (%s hand unequips during dual-wield collision)",
 				collisionAvoidanceHand, collisionAvoidanceHand == 0 ? "LEFT" : "RIGHT");
 			_MESSAGE("AutoEquip settings: Enabled=%s, Delay=%.2f",
@@ -377,18 +380,10 @@ namespace FalseEdgeVR {
 				spawnDistance, spawnOffsetX, spawnOffsetY, spawnOffsetZ);
 			_MESSAGE("WeaponSpawnMounted settings: OffsetX=%.1f, OffsetY=%.1f, OffsetZ=%.1f",
 				spawnOffsetMountedX, spawnOffsetMountedY, spawnOffsetMountedZ);
-			_MESSAGE("CloseCombat settings: EnterDistance=%.1f, ExitDistance=%.1f",
-				closeCombatEnterDistance, closeCombatExitDistance);
-			_MESSAGE("ShieldCollision settings:");
-			_MESSAGE("  CollisionThreshold=%.2f, ImminentThreshold=%.2f, ImminentThresholdBackup=%.2f",
-				shieldCollisionThreshold, shieldImminentThreshold, shieldImminentThresholdBackup);
-			_MESSAGE("  ReequipThreshold=%.2f, CollisionTimeout=%.3f, TimeToCollisionThreshold=%.3f",
-				shieldReequipThreshold, shieldCollisionTimeout, shieldTimeToCollisionThreshold);
-			_MESSAGE("  ReequipCooldown=%.3f, ReequipDelay=%.4f, SwingVelocityThreshold=%.1f, ShieldRadius=%.1f",
-				shieldReequipCooldown, shieldReequipDelay, shieldSwingVelocityThreshold, shieldRadius);
 			_MESSAGE("ShieldBash settings: Enabled=%s, BashThreshold=%d, BashWindow=%.1f, LockoutDuration=%.0f",
 				shieldBashEnabled ? "true" : "false", shieldBashThreshold, shieldBashWindow, shieldBashLockoutDuration);
 			_MESSAGE("General settings: EquipGraceFrames=%d", equipGraceFrames);
+			_MESSAGE("WeaponExclusions: %u entries", static_cast<unsigned>(weaponExclusionEntries.size()));
 			return;
 		}
 		return;

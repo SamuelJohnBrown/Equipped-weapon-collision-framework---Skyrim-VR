@@ -1,6 +1,6 @@
-#include "Helper.h"
+﻿#include "Helper.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
 	// RemoveItem native function address (Papyrus ObjectReference.RemoveItem)
 	typedef void(*_RemoveItem_Native)(VMClassRegistry* registry, UInt32 stackId, TESObjectREFR* akSource, TESForm* akItemToRemove, SInt32 aiCount, bool abSilent, TESObjectREFR* akOtherContainer);

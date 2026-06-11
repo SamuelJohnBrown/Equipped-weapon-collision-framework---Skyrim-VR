@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -17,7 +17,7 @@
 #include "vrikinterface001.h"
 #include "SkyrimVRESLAPI.h"
 
-namespace FalseEdgeVR {
+namespace TwinGripVR {
 
 	const UInt32 MOD_VERSION = 0x10000;
 	const std::string MOD_VERSION_STR = "1.0.0";
@@ -29,11 +29,8 @@ namespace FalseEdgeVR {
 	extern float bladeCollisionThreshold;       // Distance at which blades are considered touching
 	extern float bladeImminentThreshold;        // Distance at which collision is imminent (triggers unequip)
 	extern float bladeImminentThresholdBackup;  // Backup threshold, larger than primary
-	extern float bladeReequipThreshold;      // Distance required before re-equipping weapon
-	extern float bladeCollisionTimeout;         // Time (seconds) without collision before considered separated
 	extern float bladeTimeToCollisionThreshold; // Time-based collision prediction threshold
 	extern float bladeReequipCooldown;          // Cooldown after re-equip before another unequip can trigger
-	extern float reequipDelay;                  // Delay after activating weapon before equipping
 	extern float swingVelocityThreshold;     // Swing velocity threshold
 	
 	// Auto-equip grabbed weapon settings
@@ -67,22 +64,6 @@ namespace FalseEdgeVR {
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	extern int collisionAvoidanceHand;          // Which hand gets unequipped/grabbed during dual-wield collision
 
-	// Close combat settings
-	extern float closeCombatEnterDistance;      // Distance to enemy at which close combat mode activates
-	extern float closeCombatExitDistance;       // Distance to enemy at which close combat mode deactivates (buffer)
-
-	// Shield collision settings
-	extern float shieldCollisionThreshold;       // Distance at which weapon is considered touching shield
-	extern float shieldImminentThreshold;        // Distance at which collision is imminent (triggers unequip)
-	extern float shieldImminentThresholdBackup;  // Backup threshold, larger safety net
-	extern float shieldReequipThreshold;       // Distance required before re-equipping weapon
-	extern float shieldCollisionTimeout;         // Time (seconds) without collision before considered separated
-	extern float shieldTimeToCollisionThreshold; // Time-based collision prediction threshold
-	extern float shieldReequipCooldown;    // Cooldown after re-equip before another unequip can trigger
-	extern float shieldReequipDelay;     // Delay after activating weapon before equipping
-	extern float shieldSwingVelocityThreshold;   // Swing velocity threshold for shield collision
-	extern float shieldRadius;     // Shield face detection radius
-
 	// Shield bash settings
 	extern bool shieldBashEnabled;
 	extern int shieldBashThreshold;
@@ -91,6 +72,16 @@ namespace FalseEdgeVR {
 
 	// Equipment change grace period
 	extern int equipGraceFrames;
+
+	// Weapon exclusion list (mod items excluded from tracking/sounds/trigger system)
+	struct WeaponExclusionEntry
+	{
+		std::string pluginName;  // empty = match full FormID directly
+		UInt32 formID = 0;       // local FormID (with pluginName) or full FormID
+	};
+
+	extern std::vector<WeaponExclusionEntry> weaponExclusionEntries;
+	bool IsExcludedWeaponFormID(UInt32 formID);
 
 	// Load configuration from INI file
 	void loadConfig();

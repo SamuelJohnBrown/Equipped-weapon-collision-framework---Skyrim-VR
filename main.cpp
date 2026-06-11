@@ -1,4 +1,4 @@
-#include "skse64_common/skse_version.h"
+﻿#include "skse64_common/skse_version.h"
 #include <shlobj.h>
 #include <intrin.h>
 #include <string>
@@ -9,8 +9,6 @@
 #include "EquipManager.h"
 #include "VRInputHandler.h"
 #include "WeaponGeometry.h"
-#include "ShieldCollision.h"
-#include "DaggerFlipTracker.h"
 #include "ActivateHook.h"
 #include "skse64/GameEvents.h"
 #include "skse64/GameMenus.h"
@@ -18,7 +16,7 @@
 
 #include "skse64_common/BranchTrampoline.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
 	static SKSEMessagingInterface* g_messaging = NULL;
 	PluginHandle					g_pluginHandle = kPluginHandle_Invalid;
@@ -128,7 +126,7 @@ namespace FalseEdgeVR
 			if (evn->menuName == mainMenu && !evn->opening)
 			{
 				_MESSAGE("=== Main Menu Closed - Hot reloading config ===");
-				FalseEdgeVR::loadConfig();
+				TwinGripVR::loadConfig();
 				_MESSAGE("=== Config hot reload complete ===");
 			}
 
@@ -325,16 +323,6 @@ namespace FalseEdgeVR
 		InitializeWeaponGeometryTracker();
 		_MESSAGE("InitializeWeaponGeometryTracker complete");
 
-		// Initialize shield collision tracking
-		_MESSAGE("Calling InitializeShieldCollisionTracker...");
-		InitializeShieldCollisionTracker();
-		_MESSAGE("InitializeShieldCollisionTracker complete");
-
-		// Initialize dagger flip tracking
-		_MESSAGE("Calling DaggerFlipTracker::Initialize...");
-		FalseEdgeVR::DaggerFlipTracker::GetSingleton()->Initialize();
-		_MESSAGE("DaggerFlipTracker::Initialize complete");
-		
 		// Update grab listening based on current equipment
 		_MESSAGE("Calling UpdateGrabListening...");
 		VRInputHandler::GetSingleton()->UpdateGrabListening();
@@ -346,18 +334,18 @@ namespace FalseEdgeVR
 	extern "C" {
 
 		bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInfo* info) {
-			gLog.OpenRelative(CSIDL_MYDOCUMENTS, "\\My Games\\Skyrim VR\\SKSE\\FalseEdgeVR.log");
+			gLog.OpenRelative(CSIDL_MYDOCUMENTS, "\\My Games\\Skyrim VR\\SKSE\\TwinGripVR.log");
 			gLog.SetPrintLevel(IDebugLog::kLevel_Error);
 			gLog.SetLogLevel(IDebugLog::kLevel_DebugMessage);
 
-			std::string logMsg("FalseEdgeVR: ");
-			logMsg.append(FalseEdgeVR::MOD_VERSION_STR);
+			std::string logMsg("TwinGripVR: ");
+			logMsg.append(TwinGripVR::MOD_VERSION_STR);
 			_MESSAGE(logMsg.c_str());
 
 			// populate info structure
 			info->infoVersion = PluginInfo::kInfoVersion;
-			info->name = "FalseEdgeVR";
-			info->version = FalseEdgeVR::MOD_VERSION;
+			info->name = "TwinGripVR";
+			info->version = TwinGripVR::MOD_VERSION;
 
 			// store plugin handle so we can identify ourselves later
 			g_pluginHandle = skse->GetPluginHandle();
@@ -406,12 +394,12 @@ namespace FalseEdgeVR
 					SetupReceptors();
 				else if (msg->type == SKSEMessagingInterface::kMessage_DataLoaded)
 				{
-					FalseEdgeVR::loadConfig();
+					TwinGripVR::loadConfig();
 
 					// NEW SKSEVR feature: trampoline interface object from QueryInterface() - Use SKSE existing process code memory pool - allow Skyrim to run without ASLR
-					if (FalseEdgeVR::g_trampolineInterface)
+					if (TwinGripVR::g_trampolineInterface)
 					{
-						void* branch = FalseEdgeVR::g_trampolineInterface->AllocateFromBranchPool(g_pluginHandle, TRAMPOLINE_SIZE);
+						void* branch = TwinGripVR::g_trampolineInterface->AllocateFromBranchPool(g_pluginHandle, TRAMPOLINE_SIZE);
 						if (!branch) {
 							_ERROR("couldn't acquire branch trampoline from SKSE. this is fatal. skipping remainder of init process.");
 							return;
@@ -419,7 +407,7 @@ namespace FalseEdgeVR
 
 						g_branchTrampoline.SetBase(TRAMPOLINE_SIZE, branch);
 
-						void* local = FalseEdgeVR::g_trampolineInterface->AllocateFromLocalPool(g_pluginHandle, TRAMPOLINE_SIZE);
+						void* local = TwinGripVR::g_trampolineInterface->AllocateFromLocalPool(g_pluginHandle, TRAMPOLINE_SIZE);
 						if (!local) {
 							_ERROR("couldn't acquire codegen buffer from SKSE. this is fatal. skipping remainder of init process.");
 							return;
@@ -447,7 +435,7 @@ namespace FalseEdgeVR
 						_MESSAGE("Using legacy SKSE trampoline creation.");
 					}
 
-					FalseEdgeVR::GameLoad();
+					TwinGripVR::GameLoad();
 					
 					// Setup Activate hook to block player from activating grabbed weapons
 					SetupActivateHook();
@@ -508,7 +496,7 @@ namespace FalseEdgeVR
 						// Clear all VR tracking state first (old references are now invalid)
 						VRInputHandler::GetSingleton()->ClearAllState();
 						
-						FalseEdgeVR::PostLoadGame();
+						TwinGripVR::PostLoadGame();
 						
 						// Update equipment state after loading a save
 						EquipManager::GetSingleton()->UpdateEquipmentState();

@@ -1,10 +1,10 @@
-#pragma once
+﻿#pragma once
 
 #include "skse64/GameReferences.h"
 #include "skse64_common/Relocation.h"
 #include "skse64_common/BranchTrampoline.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
   // ============================================
     // Activate Hook - Block player from activating grabbed weapons

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include "skse64/PapyrusSpell.h"
 #include "skse64/PapyrusGame.h"
 #include "skse64/PapyrusActor.h"
@@ -31,7 +31,7 @@
 
 #include "config.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
 	UInt32 GetFullFormIdMine(const char* espName, UInt32 baseFormId);
 	void ShowErrorBoxAndTerminate(const char* errorString);

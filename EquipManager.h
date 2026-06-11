@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "skse64/GameReferences.h"
 #include "skse64/GameObjects.h"
@@ -6,7 +6,7 @@
 #include "skse64/GameRTTI.h"
 #include "config.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
     // Weapon type classification
     enum class WeaponType
@@ -156,6 +156,18 @@ namespace FalseEdgeVR
         
     // Re-equip the right hand weapon
         void ForceReequipRightHand();
+
+        // Schedule a force re-equip on the game thread that waits for the
+        // activated item to arrive in the player's inventory first.
+        // Use this instead of ForceReequipHand() right after SafeActivate()
+        // to avoid the same-frame pickup/equip race (weapon "disappearing").
+        void ScheduleForceReequip(bool isLeftHand);
+
+        // Get the cached weapon FormID for a hand (0 = none)
+        UInt32 GetCachedWeaponFormID(bool isLeftHand) const
+        {
+            return isLeftHand ? m_cachedWeaponFormIDLeft : m_cachedWeaponFormIDRight;
+        }
         
         // Check if there's a pending re-equip for a hand
         bool HasPendingReequip(bool isLeftHand) const;
@@ -177,6 +189,13 @@ namespace FalseEdgeVR
         
         // Track if we're in dual-wield same weapon mode (for cleanup after re-equip)
         bool WasDualWieldingSameWeapon(bool isLeftHand) const;
+
+        // Delete orphaned dual-wield duplicate world copies (call on death/load).
+        // In the dual-wield same-weapon case the spawned world copy coexists with
+        // the inventory original (+1 weapon) until the trigger re-equip deletes it.
+        // If tracking is about to be wiped, the copy must be deleted or it becomes
+        // a permanent duplicate. Uses RefID lookup, safe across save/load.
+        void CleanupOrphanedDuplicates();
         
    // Check and process pending auto-unequip (for trigger-based weapon hold)
         void CheckPendingAutoUnequip();
@@ -220,6 +239,13 @@ namespace FalseEdgeVR
         // Dropped weapon world references
       TESObjectREFR* m_droppedWeaponLeft = nullptr;
         TESObjectREFR* m_droppedWeaponRight = nullptr;
+        
+        // RefID + base FormID of the spawned world copies (for safe cleanup after
+        // the pointers go stale, e.g. across save/load)
+        UInt32 m_droppedWeaponRefIDLeft = 0;
+        UInt32 m_droppedWeaponRefIDRight = 0;
+        UInt32 m_droppedWeaponBaseIDLeft = 0;
+        UInt32 m_droppedWeaponBaseIDRight = 0;
         
         // Track if we were dual-wielding same weapon when collision was triggered
         // This is needed to know if we should clean up the duplicate after re-equip

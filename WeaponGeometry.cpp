@@ -1,4 +1,4 @@
-#include "WeaponGeometry.h"
+﻿#include "WeaponGeometry.h"
 #include "Engine.h"
 #include "EquipManager.h"
 #include "VRInputHandler.h"
@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cfloat>
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
     // Static constant for blade radius (thickness)
     const float WeaponGeometryTracker::BLADE_RADIUS = 2.0f;  // Approximate blade thickness in units
@@ -32,7 +32,6 @@ namespace FalseEdgeVR
         
 m_geometryState.leftHand.Clear();
         m_geometryState.rightHand.Clear();
-        m_lastCollision.Clear();
       m_bladesInContact = false;
     m_wasInContact = false;
         m_collisionImminent = false;
@@ -90,7 +89,7 @@ loggedOnce = true;
  bool rightIsShield = rightEquipped && EquipManager::IsShield(rightEquipped);
         
         // Check for equipment changes - reset grace period if weapons changed
-        // Note: Ignore shields - they are handled by ShieldCollisionTracker
+        // Note: Ignore shields - they are not tracked as blade geometry
    UInt32 currentLeftFormID = (leftEquipped && !leftIsShield) ? leftEquipped->formID : 0;
         UInt32 currentRightFormID = (rightEquipped && !rightIsShield) ? rightEquipped->formID : 0;
     
@@ -162,7 +161,7 @@ m_framesSinceEquipChange = 0;
        loggedHiggsState = true;
    }
    
-   // Update left hand geometry - skip if shield (ShieldCollisionTracker handles that)
+   // Update left hand geometry - skip if shield
    if (leftEquipped && !leftIsShield)
    {
        // Normal equipped weapon
@@ -265,14 +264,6 @@ m_bladesInContact = collision.isColliding;
             
             if (m_bladesInContact)
            {
-   m_lastCollision = collision;
-
-     // Fire collision callback if blades just came into contact
-         if (!m_wasInContact && m_collisionCallback)
-      {
-  m_collisionCallback(collision);
-              }
-    
             // Log collision event (only on initial contact)
       if (!m_wasInContact)
                {
@@ -298,14 +289,6 @@ _MESSAGE("  Distance: %.2f, Raycast Hits: %d", collision.closestDistance, collis
     }
    else if (m_collisionImminent)
     {
-   m_lastCollision = collision;
-  
-       // Fire imminent callback if collision just became imminent
-     if (!m_wasImminent && !m_wasInContact && m_imminentCallback)
-               {
-     m_imminentCallback(collision);
-       }
-    
               // IMPORTANT: Don't trigger during grace period or if grinding was just happening
         bool offHandOnCooldown = VRInputHandler::GetSingleton()->IsHandOnCooldown(offHandIsLeft);
      bool withinBackupOnly = (collision.closestDistance <= bladeImminentThresholdBackup) && 
@@ -341,16 +324,7 @@ else if (wasJustGrinding)
              static bool loggedGrindTransition = false;
        loggedGrindTransition = false;
    
-      if (VRInputHandler::GetSingleton()->IsInCloseCombatMode())
-            {
-          static bool loggedCloseCombatSkip = false;
-            if (!loggedCloseCombatSkip)
-       {
-           _MESSAGE("WeaponGeometry: Collision imminent but CLOSE COMBAT MODE active - skipping unequip");
-        loggedCloseCombatSkip = true;
-           }
-          }
-        else if (VRInputHandler::IsLeftTriggerPressed() || VRInputHandler::IsRightTriggerPressed())
+        if (VRInputHandler::IsLeftTriggerPressed() || VRInputHandler::IsRightTriggerPressed())
          {
       static bool loggedTriggerSkip = false;
           if (!loggedTriggerSkip)
@@ -361,8 +335,6 @@ else if (wasJustGrinding)
       }
         else
   {
-  static bool loggedCloseCombatSkip = false;
-         loggedCloseCombatSkip = false;
            static bool loggedTriggerSkip = false;
      loggedTriggerSkip = false;
    
@@ -412,8 +384,6 @@ collision.closestDistance, m_collisionThreshold);
         StopBlocking();
     }
     }
-           
-     m_lastCollision.Clear();
       }
         }
     }
@@ -764,33 +734,6 @@ return "SHIELD";
     const BladeGeometry& WeaponGeometryTracker::GetBladeGeometry(bool isLeftHand) const
     {
         return isLeftHand ? m_geometryState.leftHand : m_geometryState.rightHand;
-    }
-
-    void WeaponGeometryTracker::LogGeometryState()
-    {
-        if (m_geometryState.leftHand.isValid)
-        {
-    LOG("WeaponGeometry: Left Hand - Base(%.2f, %.2f, %.2f) Tip(%.2f, %.2f, %.2f) Length: %.2f",
-       m_geometryState.leftHand.basePosition.x,
-    m_geometryState.leftHand.basePosition.y,
-             m_geometryState.leftHand.basePosition.z,
-      m_geometryState.leftHand.tipPosition.x,
-      m_geometryState.leftHand.tipPosition.y,
-  m_geometryState.leftHand.tipPosition.z,
-         m_geometryState.leftHand.bladeLength);
-        }
-        
-        if (m_geometryState.rightHand.isValid)
-        {
-  LOG("WeaponGeometry: Right Hand - Base(%.2f, %.2f, %.2f) Tip(%.2f, %.2f, %.2f) Length: %.2f",
-    m_geometryState.rightHand.basePosition.x,
-          m_geometryState.rightHand.basePosition.y,
-    m_geometryState.rightHand.basePosition.z,
-         m_geometryState.rightHand.tipPosition.x,
-  m_geometryState.rightHand.tipPosition.y,
-           m_geometryState.rightHand.tipPosition.z,
-           m_geometryState.rightHand.bladeLength);
-        }
     }
 
     // ============================================

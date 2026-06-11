@@ -1,8 +1,7 @@
-#include "Engine.h"
+﻿#include "Engine.h"
 #include "EquipManager.h"
 #include "VRInputHandler.h"
 #include "WeaponGeometry.h"
-#include "ShieldCollision.h"
 #include "skse64/GameObjects.h"
 #include <skse64/PapyrusActor.cpp>
 #include "skse64/GameRTTI.h"
@@ -11,7 +10,7 @@
 #include <thread>
 #include <chrono>
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
 	SKSETrampolineInterface* g_trampolineInterface = nullptr;
 
@@ -260,7 +259,7 @@ namespace FalseEdgeVR
 				{
 					_MESSAGE("[ReequipCheck] LEFT hand weapon was unequipped - re-equipping!");
 					BGSEquipSlot* leftSlot = GetLeftHandSlot();
-					FalseEdgeVR::EquipManager::s_suppressDrawSound = true;
+					TwinGripVR::EquipManager::s_suppressDrawSound = true;
 					
 					// Temporarily strip enchantment to prevent enchant VFX/sound
 					TESObjectWEAP* weap = DYNAMIC_CAST(itemForm, TESForm, TESObjectWEAP);
@@ -279,7 +278,7 @@ namespace FalseEdgeVR
 						weap->enchantable.enchantment = cachedEnchant;
 					}
 					
-					FalseEdgeVR::EquipManager::s_suppressDrawSound = false;
+					TwinGripVR::EquipManager::s_suppressDrawSound = false;
 					_MESSAGE("[ReequipCheck] Re-equipped weapon to LEFT hand (silent)");
 				}
 				
@@ -288,7 +287,7 @@ namespace FalseEdgeVR
 				{
 					_MESSAGE("[ReequipCheck] RIGHT hand weapon was unequipped - re-equipping!");
 					BGSEquipSlot* rightSlot = GetRightHandSlot();
-					FalseEdgeVR::EquipManager::s_suppressDrawSound = true;
+					TwinGripVR::EquipManager::s_suppressDrawSound = true;
 					// Temporarily strip enchantment to prevent enchant VFX/sound
 					TESObjectWEAP* weap2 = DYNAMIC_CAST(itemForm, TESForm, TESObjectWEAP);
 					EnchantmentItem* cachedEnchant2 = nullptr;
@@ -305,7 +304,7 @@ namespace FalseEdgeVR
 					{
 						weap2->enchantable.enchantment = cachedEnchant2;
 					}
-					FalseEdgeVR::EquipManager::s_suppressDrawSound = false;
+					TwinGripVR::EquipManager::s_suppressDrawSound = false;
 					_MESSAGE("[ReequipCheck] Re-equipped weapon to RIGHT hand (silent)");
 				}
 			}
@@ -406,22 +405,39 @@ namespace FalseEdgeVR
 		}
 	};
 
-	// Thread function to delay then queue the removal task
-	static void DelayedRemoveItemThread(UInt32 itemFormId, int delayMs)
+	// Task that counts down frames on the game thread before running the removal.
+	// Replaces the old detached-thread + sleep approach, which could race a
+	// save/load (removal lost if the game saved during the sleep window) and ran
+	// off the game thread.
+	class FrameDelayedRemoveItemTask : public TaskDelegate
 	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(delayMs));
-		
-		extern SKSETaskInterface* g_task;
-		if (g_task)
+	public:
+		UInt32 m_itemFormId;
+		int m_framesLeft;
+
+		FrameDelayedRemoveItemTask(UInt32 itemFormId, int framesLeft)
+			: m_itemFormId(itemFormId), m_framesLeft(framesLeft) {}
+
+		virtual void Run() override
 		{
-			g_task->AddTask(new DelayedRemoveItemTask(itemFormId));
-			_MESSAGE("[DelayedRemove] Queued item removal after %dms delay for item %08X", delayMs, itemFormId);
+			extern SKSETaskInterface* g_task;
+			if (m_framesLeft > 0 && g_task)
+			{
+				// Re-queue for next frame
+				g_task->AddTask(new FrameDelayedRemoveItemTask(m_itemFormId, m_framesLeft - 1));
+				return;
+			}
+
+			// Countdown finished - run the removal logic now (on the game thread)
+			DelayedRemoveItemTask removal(m_itemFormId);
+			removal.Run();
 		}
-		else
+
+		virtual void Dispose() override
 		{
-			_MESSAGE("[DelayedRemove] ERROR: g_task not available!");
+			delete this;
 		}
-	}
+	};
 
 	void DelayedRemoveItemFromInventory(UInt32 itemFormId, int delayMs)
 	{
@@ -431,9 +447,21 @@ namespace FalseEdgeVR
 			return;
 		}
 
-		// Start a detached thread to handle the delay
-		std::thread(DelayedRemoveItemThread, itemFormId, delayMs).detach();
-		_MESSAGE("[DelayedRemove] Started delayed removal thread for item %08X (delay: %dms)", itemFormId, delayMs);
+		// Convert ms to frames (~90fps = ~11ms per frame)
+		int frames = delayMs / 11;
+		if (frames < 1)
+			frames = 1;
+
+		extern SKSETaskInterface* g_task;
+		if (g_task)
+		{
+			g_task->AddTask(new FrameDelayedRemoveItemTask(itemFormId, frames));
+			_MESSAGE("[DelayedRemove] Scheduled frame-based removal for item %08X (%d frames, ~%dms)", itemFormId, frames, delayMs);
+		}
+		else
+		{
+			_MESSAGE("[DelayedRemove] ERROR: g_task not available!");
+		}
 	}
 
 	// ============================================
@@ -573,7 +601,7 @@ namespace FalseEdgeVR
 		// This function is called during DataLoaded, before HIGGS is ready
 		// Only do non-HIGGS dependent initialization here
 		
-		LOG("StartMod: FalseEdgeVR starting...");
+		LOG("StartMod: TwinGripVR starting...");
 		
 		// Log initial left-handed mode
 		_MESSAGE("==============================================");

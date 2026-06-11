@@ -1,4 +1,4 @@
-#include "ActivateHook.h"
+﻿#include "ActivateHook.h"
 #include "EquipManager.h"
 #include "Engine.h"
 #include "VRInputHandler.h"
@@ -7,7 +7,7 @@
 #include "skse64/GameRTTI.h"
 #include "skse64_common/SafeWrite.h"
 
-namespace FalseEdgeVR
+namespace TwinGripVR
 {
     // Forward declaration from VRInputHandler.cpp
     bool IsControllerInShoulderZone(bool isLeftVRController);
