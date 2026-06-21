@@ -1,4 +1,0 @@
-LIBRARY	"FalseEdgeVR"
-EXPORTS
-SKSEPlugin_Query
-SKSEPlugin_Load
