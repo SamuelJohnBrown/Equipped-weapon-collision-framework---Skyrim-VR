@@ -1,6 +1,7 @@
-﻿#include "Helper.h"
+#include "Helper.h"
+#include "EquipManager.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
 	// RemoveItem native function address (Papyrus ObjectReference.RemoveItem)
 	typedef void(*_RemoveItem_Native)(VMClassRegistry* registry, UInt32 stackId, TESObjectREFR* akSource, TESForm* akItemToRemove, SInt32 aiCount, bool abSilent, TESObjectREFR* akOtherContainer);
@@ -112,7 +113,7 @@ namespace TwinGripVR
 	{
 		if ((*g_thePlayer) && (*g_thePlayer)->loadedState)
 		{
-			
+			EquipManager::GetSingleton()->RecoverGrabbedWeaponsOnLoad();
 		}
 	}
 

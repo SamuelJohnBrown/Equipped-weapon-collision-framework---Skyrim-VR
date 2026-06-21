@@ -1,9 +1,9 @@
-﻿#pragma once
+#pragma once
 
 #include "Helper.h"
 #include "skse64/PluginAPI.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
 	extern SKSETrampolineInterface* g_trampolineInterface;
 	extern HiggsPluginAPI::IHiggsInterface001* higgsInterface;
@@ -57,8 +57,16 @@ namespace TwinGripVR
 	// soundFormId is the full FormID of the SOUN record
 	void PlaySoundAtActor(UInt32 soundFormId, Actor* actor);
 
-	// Set the ownership of an object reference to the player
-	// This prevents the item from being flagged as stolen when picked up
+	// Assign player ownership on an extra-data list (inventory stack or world ref).
+	void SetPlayerOwnership(BaseExtraList* extraList);
+
+	// Remove ownership extra data (clears stolen UI when item is already in player inventory).
+	void ClearItemOwnership(BaseExtraList* extraList);
+
+	// Set player ownership on every inventory stack of this weapon form.
+	void EnsurePlayerOwnsWeaponInInventory(PlayerCharacter* player, TESForm* weaponForm);
+
+	// Set player ownership on a world reference before pickup/activate.
 	void SetOwnerToPlayer(TESObjectREFR* objRef);
 
 	// Delete a spawned world object (removes it from the world)

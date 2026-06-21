@@ -1,10 +1,10 @@
-﻿#pragma once
+#pragma once
 
 #include "skse64/GameReferences.h"
 #include "skse64_common/Relocation.h"
 #include "skse64_common/BranchTrampoline.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
   // ============================================
     // Activate Hook - Block player from activating grabbed weapons
@@ -26,6 +26,9 @@ namespace TwinGripVR
     
     // Sets up the activate hook - call this during mod initialization
     void SetupActivateHook();
+
+    // Hook game EquipManager::EquipItem to pick up conflicting grabbed weapons before equipping.
+    void SetupEquipItemHook();
     
     // Safe activate function - sets bypass flag and calls original
     // Use this in our code instead of calling OriginalActivate directly

@@ -1,12 +1,14 @@
-﻿#pragma once
+#pragma once
 
 #include "skse64/GameReferences.h"
 #include "skse64/GameObjects.h"
 #include "skse64/GameEvents.h"
 #include "skse64/GameRTTI.h"
+#include "skse64/PluginAPI.h"
 #include "config.h"
+#include <chrono>
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
     // Weapon type classification
     enum class WeaponType
@@ -131,13 +133,38 @@ namespace TwinGripVR
    
         // Check if the player currently has a 2H weapon equipped
         static bool PlayerHasTwoHandedEquipped();
+
+        static bool Get2HWeaponWornGameHands(Actor* actor, TESForm* weapon, bool& wornLeft, bool& wornRight);
+        static TESForm* Get2HWeaponWornOnGameHand(Actor* actor, bool isLeftGameHand);
+
+        // Determine which game hand an item was just equipped to (worn lists, then GetEquippedObject).
+        static bool TryGetPlayerEquipHand(Actor* actor, TESForm* item, bool& isLeftHandOut);
         
         // ============================================
         // Forced Equip/Unequip Functions
         // ============================================
   
-        // Unequip weapon and drop it for HIGGS to grab
-        void ForceUnequipAndGrab(bool isLeftHand);
+        // Unequip weapon and drop it for HIGGS to grab. Returns true if unequip+spawn succeeded.
+        bool ForceUnequipAndGrab(bool isLeftHand);
+
+        // Resolve the grabbed world weapon for a game hand (tracked ref, refID lookup, or HIGGS).
+        TESObjectREFR* ResolveGrabbedWeaponRefForHand(bool isLeftGameHand) const;
+
+        // True when this game hand has a HIGGS-grabbed weapon that is not the item being equipped.
+        bool HasConflictingGrabbedWeaponInHand(bool isLeftGameHand, TESForm* itemBeingEquipped) const;
+
+        // Recover a holstered/grabbed world weapon without re-entering EquipItem.
+        // Prefer AddItem + delete; SafeActivate only when allowActivateFallback is true
+        // (deferred game-thread task, never from inside EquipItem).
+        bool PickUpGrabbedWeaponBeforeEquip(bool isLeftGameHand, bool allowActivateFallback = false);
+
+        // Defer grabbed-weapon recovery until after the current equip finishes (SpellWheel, etc.).
+        void SchedulePickUpGrabbedWeaponBeforeEquip(bool isLeftGameHand);
+
+        void ScheduleDelayedLogPlayer2HWeaponEquip(UInt32 weaponFormID);
+        void LogPlayer2HWeaponEquip(TESForm* weapon);
+        void TryLog2HLeftHandWithRightGameHandTrigger(TESForm* weapon = nullptr);
+        void CheckLeftHandUnequipAfterCombo(UInt32 leftWeaponFormID);
 
       // Unequip the weapon from the specified hand (stores for re-equip)
   void ForceUnequipHand(bool isLeftHand);
@@ -163,6 +190,19 @@ namespace TwinGripVR
         // to avoid the same-frame pickup/equip race (weapon "disappearing").
         void ScheduleForceReequip(bool isLeftHand);
 
+        // Equip a weapon to a game hand, preserving tempering/enchant/favorite extra data.
+        void EquipWeaponToGameHand(PlayerCharacter* player, TESForm* weaponForm, bool isLeftGameHand);
+
+        // Move favorite cache when a grabbed weapon transfers to the other game hand.
+        void TransferFavoriteCacheForHandSwap(bool fromLeftGameHand, bool toLeftGameHand, UInt32 weaponFormID);
+
+        // Remember a favorited weapon across intentional drops (inventory copy is removed on grab spawn).
+        void PreserveFavoriteForForm(UInt32 weaponFormID, bool isLeftGameHand);
+
+        // Reset the cached re-equip data (FormID/health/enchant/favorite) for a hand.
+        // ScheduledForceReequipTask calls this after the equip completes.
+        void ClearReequipCache(bool isLeftHand);
+
         // Get the cached weapon FormID for a hand (0 = none)
         UInt32 GetCachedWeaponFormID(bool isLeftHand) const
         {
@@ -180,6 +220,16 @@ namespace TwinGripVR
    
         // Get the dropped weapon reference (for HIGGS grab)
         TESObjectREFR* GetDroppedWeaponRef(bool isLeftHand) const;
+
+        UInt32 GetDroppedWeaponBaseID(bool isLeftHand) const
+        {
+            return isLeftHand ? m_droppedWeaponBaseIDLeft : m_droppedWeaponBaseIDRight;
+        }
+
+        UInt32 GetDroppedWeaponRefID(bool isLeftHand) const
+        {
+            return isLeftHand ? m_droppedWeaponRefIDLeft : m_droppedWeaponRefIDRight;
+        }
         
   // Clear dropped weapon reference
         void ClearDroppedWeaponRef(bool isLeftHand);
@@ -196,20 +246,39 @@ namespace TwinGripVR
         // If tracking is about to be wiped, the copy must be deleted or it becomes
         // a permanent duplicate. Uses RefID lookup, safe across save/load.
         void CleanupOrphanedDuplicates();
+
+        // Return mod-grabbed world weapons to inventory after save/load (or delete duplicates).
+        void RecoverGrabbedWeaponsOnLoad();
+
+        // Merge live dropped-weapon tracking into load-recovery state before it is cleared.
+        void CaptureDroppedWeaponsForLoadRecovery();
+
+        bool WasDroppedWeaponFavorited(bool isLeftGameHand) const;
+
+        static void RestoreFavoriteInInventory(PlayerCharacter* player, TESForm* weaponForm);
+
+        static void RegisterSerialization(SKSESerializationInterface* intfc);
         
    // Check and process pending auto-unequip (for trigger-based weapon hold)
         void CheckPendingAutoUnequip();
         
    // Check if there's a pending auto-unequip
-     bool HasPendingAutoUnequip() const { return m_pendingAutoUnequipForm != nullptr; }
+     bool HasPendingAutoUnequip() const { return m_pendingAutoUnequipLeftForm != nullptr || m_pendingAutoUnequipRightForm != nullptr; }
 
     private:
+        void ProcessPendingAutoUnequip(bool isLeftHand);
+
  EquipManager() = default;
         ~EquipManager() = default;
  EquipManager(const EquipManager&) = delete;
   EquipManager& operator=(const EquipManager&) = delete;
         
-      void LogEquipmentState();
+        void LogEquipmentState();
+
+        bool ShouldPreserveFavorite(TESForm* weaponForm) const;
+        static bool IsFormFavoritedInInventory(PlayerCharacter* player, TESForm* weaponForm);
+        BaseExtraList* FindInventoryExtraDataForEquip(PlayerCharacter* player, TESForm* weaponForm, bool isLeftGameHand);
+        void RestoreFavoriteOnEquippedHand(PlayerCharacter* player, TESForm* weaponForm, bool isLeftGameHand);
 
   PlayerEquipState m_equipState;
         
@@ -235,6 +304,10 @@ namespace TwinGripVR
     // Cache favorite state for re-equip
    bool m_wasFavoritedLeft = false;
         bool m_wasFavoritedRight = false;
+
+        // Survives intentional drops / tracking clears (world pickup has no ExtraHotkey copy)
+        UInt32 m_preservedFavoriteFormIDLeft = 0;
+        UInt32 m_preservedFavoriteFormIDRight = 0;
         
         // Dropped weapon world references
       TESObjectREFR* m_droppedWeaponLeft = nullptr;
@@ -253,17 +326,25 @@ namespace TwinGripVR
    bool m_wasDualWieldingSameWeaponRight = false;
         
    // Pending auto-unequip tracking (for trigger-based weapon hold system)
-   // When weapon is equipped to off-hand while dual-wielding and trigger not held,
-        // flag it for immediate unequip on next frame
-        bool m_pendingAutoUnequipLeft = false;
-        bool m_pendingAutoUnequipRight = false;
-        TESForm* m_pendingAutoUnequipForm = nullptr;
+   // When a weapon is equipped and its trigger is not held, flag it for unequip
+   // on the next frame. Tracked PER HAND so equipping both weapons in quick
+   // succession does not let one hand clobber the other's pending state.
+        TESForm* m_pendingAutoUnequipLeftForm = nullptr;
+        TESForm* m_pendingAutoUnequipRightForm = nullptr;
         
   // Track which hand we're currently force-unequipping (for same-weapon detection)
         // -1 = none, 0 = right hand, 1 = left hand
     int m_forceUnequipHand = -1;
         
       bool m_initialized = false;
+
+        // Guards against stacking duplicate delayed left-hand unequip checks
+        bool m_comboLeftUnequipCheckPending = false;
+
+        // Tracks the left game hand 2H weapon and when it became equipped,
+        // so the combo re-equip can require a minimum equipped duration.
+        UInt32 m_leftHand2HFormID = 0;
+        std::chrono::steady_clock::time_point m_leftHand2HEquipTime;
     };
 
     // Convenience functions

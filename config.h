@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 #include <iostream>
 #include <string>
 #include <fstream>
@@ -17,14 +17,14 @@
 #include "vrikinterface001.h"
 #include "SkyrimVRESLAPI.h"
 
-namespace TwinGripVR {
+namespace FalseEdgeVR {
 
 	const UInt32 MOD_VERSION = 0x10000;
 	const std::string MOD_VERSION_STR = "1.0.0";
 	extern int leftHandedMode;
 
 	extern int logging;
-  
+
 	// Blade collision settings
 	extern float bladeCollisionThreshold;       // Distance at which blades are considered touching
 	extern float bladeImminentThreshold;        // Distance at which collision is imminent (triggers unequip)
@@ -39,6 +39,11 @@ namespace TwinGripVR {
 
 	// Trigger-based weapon hold settings
 	extern float triggerUnequipDelay;           // Delay (seconds) after trigger release before unequipping weapon
+
+	// When true, equipping a grabbed weapon requires a tap (press+release)
+	// followed by an immediate press-and-hold. When false (default), a simple
+	// trigger hold equips the grabbed weapon.
+	extern bool tapThenHoldGrabEquip;
 
 	// Intentional drop settings (grip spam detection)
 	extern int gripSpamThreshold;    // Number of grip releases to trigger intentional drop

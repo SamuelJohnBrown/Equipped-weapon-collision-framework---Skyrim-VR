@@ -31,7 +31,7 @@
 
 #include "config.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
 	UInt32 GetFullFormIdMine(const char* espName, UInt32 baseFormId);
 	void ShowErrorBoxAndTerminate(const char* errorString);

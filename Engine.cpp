@@ -1,4 +1,4 @@
-﻿#include "Engine.h"
+#include "Engine.h"
 #include "EquipManager.h"
 #include "VRInputHandler.h"
 #include "WeaponGeometry.h"
@@ -10,7 +10,7 @@
 #include <thread>
 #include <chrono>
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
 	SKSETrampolineInterface* g_trampolineInterface = nullptr;
 
@@ -58,7 +58,6 @@ namespace TwinGripVR
 
 			// Cast the spell on the player (source = player, target = player for self-cast spells)
 			bool result = CastSpell_Native((*g_skyrimVM)->GetClassRegistry(), 0, spell, player, player);
-			_MESSAGE("[CastSpell] Cast spell %08X on player, result: %s", m_formId, result ? "success" : "failed");
 		}
 
 		virtual void Dispose() override
@@ -79,7 +78,6 @@ namespace TwinGripVR
 		if (g_task)
 		{
 			g_task->AddTask(new CastSpellOnPlayerTask(formId));
-			_MESSAGE("[CastSpell] Queued spell cast %08X on player", formId);
 		}
 		else
 		{
@@ -125,7 +123,6 @@ namespace TwinGripVR
 
 		// Play the sound using the Papyrus native function
 		PlaySoundEffect((*g_skyrimVM)->GetClassRegistry(), 0, sound, player);
-		_MESSAGE("[PlaySound] Played sound %08X at player", soundFormId);
 	}
 
 	// Play a sound at any actor's location (NPC or player)
@@ -159,30 +156,102 @@ namespace TwinGripVR
 		PlaySoundEffect((*g_skyrimVM)->GetClassRegistry(), 0, sound, actor);
 	}
 
-	// Remove ownership from an object reference
-// This prevents the item from being flagged as stolen when picked up
-// By removing ownership entirely, the item becomes "unowned" and can be freely taken
-	void SetOwnerToPlayer(TESObjectREFR* objRef)
+	// Assign player ownership on an extra-data list (inventory stack or world ref).
+	static TESForm* GetPlayerOwnershipForm(PlayerCharacter* player)
 	{
-		if (!objRef)
+		if (!player)
+			return nullptr;
+		// ExtraOwnership uses the actor base (TESNPC), not the live reference.
+		if (player->baseForm)
+			return player->baseForm;
+		return player;
+	}
+
+	void SetPlayerOwnership(BaseExtraList* extraList)
+	{
+		if (!extraList)
+			return;
+
+		PlayerCharacter* player = *g_thePlayer;
+		TESForm* ownerForm = GetPlayerOwnershipForm(player);
+		if (!ownerForm)
+			return;
+
+		static const RelocPtr<uintptr_t> s_ExtraOwnershipVtbl(0x015A32D0);
+
+		ExtraOwnership* xOwnership = static_cast<ExtraOwnership*>(extraList->GetByType(kExtraData_Ownership));
+		if (xOwnership)
 		{
-			_MESSAGE("[SetOwner] ERROR: Object reference is null");
+			xOwnership->owner = ownerForm;
 			return;
 		}
 
-		// Get the extra data list
-		BaseExtraList* extraList = &objRef->extraData;
+		xOwnership = (ExtraOwnership*)BSExtraData::Create(sizeof(ExtraOwnership), s_ExtraOwnershipVtbl.GetUIntPtr());
+		if (!xOwnership)
+			return;
 
-		// Remove ownership if it exists - this makes the item unowned/free to take
-		if (extraList->HasType(kExtraData_Ownership))
+		// BaseExtraList::Add requires m_presence; freshly spawned refs may not be ready yet.
+		struct ExtraListProbe
 		{
-			extraList->Remove(kExtraData_Ownership, extraList->GetByType(kExtraData_Ownership));
-			_MESSAGE("[SetOwner] Removed ownership from RefID: %08X (now unowned)", objRef->formID);
-		}
-		else
+			void* m_data;
+			void* m_presence;
+		};
+		if (!static_cast<ExtraListProbe*>(static_cast<void*>(extraList))->m_presence)
+			return;
+
+		xOwnership->owner = ownerForm;
+		extraList->Add(kExtraData_Ownership, xOwnership);
+	}
+
+	void ClearItemOwnership(BaseExtraList* extraList)
+	{
+		if (!extraList || !extraList->HasType(kExtraData_Ownership))
+			return;
+
+		BSExtraData* xOwnership = extraList->GetByType(kExtraData_Ownership);
+		if (xOwnership)
+			extraList->Remove(kExtraData_Ownership, xOwnership);
+	}
+
+	void EnsurePlayerOwnsWeaponInInventory(PlayerCharacter* player, TESForm* weaponForm)
+	{
+		if (!player || !weaponForm)
+			return;
+
+		ExtraContainerChanges* containerChanges = static_cast<ExtraContainerChanges*>(
+			player->extraData.GetByType(kExtraData_ContainerChanges));
+		if (!containerChanges || !containerChanges->data)
+			return;
+
+		InventoryEntryData* entryData = containerChanges->data->FindItemEntry(weaponForm);
+		if (!entryData || !entryData->extendDataList)
+			return;
+
+		for (ExtendDataList::Iterator it = entryData->extendDataList->Begin(); !it.End(); ++it)
 		{
-			_MESSAGE("[SetOwner] No ownership to remove for RefID: %08X (already unowned)", objRef->formID);
+			BaseExtraList* extraList = it.Get();
+			if (extraList)
+				SetPlayerOwnership(extraList);
 		}
+
+		// If any stack still reads as not player-owned, strip ownership (matches console setownership).
+		if (!CALL_MEMBER_FN(entryData, IsOwnedBy)(player, true))
+		{
+			for (ExtendDataList::Iterator it = entryData->extendDataList->Begin(); !it.End(); ++it)
+			{
+				BaseExtraList* extraList = it.Get();
+				if (extraList)
+					ClearItemOwnership(extraList);
+			}
+		}
+	}
+
+	void SetOwnerToPlayer(TESObjectREFR* objRef)
+	{
+		if (!objRef)
+			return;
+
+		SetPlayerOwnership(&objRef->extraData);
 	}
 
 	// ============================================
@@ -201,12 +270,10 @@ namespace TwinGripVR
 			return;
 		}
 
-		_MESSAGE("[DeleteWorldObject] Deleting world object RefID: %08X", objRef->formID);
 		
 		// Call the Papyrus Delete function
 		DeleteObject_Native((*g_skyrimVM)->GetClassRegistry(), 0, objRef);
 		
-		_MESSAGE("[DeleteWorldObject] Delete command sent for RefID: %08X", objRef->formID);
 	}
 
 	// ============================================
@@ -248,8 +315,6 @@ namespace TwinGripVR
 			bool leftStillHasWeapon = (leftEquippedAfter && leftEquippedAfter->formID == m_itemFormId);
 			bool rightStillHasWeapon = (rightEquippedAfter && rightEquippedAfter->formID == m_itemFormId);
 			
-			_MESSAGE("[ReequipCheck] After removal processed - Left equipped: %s, Right equipped: %s",
-				leftStillHasWeapon ? "YES" : "NO", rightStillHasWeapon ? "YES" : "NO");
 			
 			::EquipManager* equipMan = ::EquipManager::GetSingleton();
 			if (equipMan)
@@ -257,9 +322,7 @@ namespace TwinGripVR
 				// Check LEFT hand
 				if (m_leftHadWeapon && !leftStillHasWeapon)
 				{
-					_MESSAGE("[ReequipCheck] LEFT hand weapon was unequipped - re-equipping!");
-					BGSEquipSlot* leftSlot = GetLeftHandSlot();
-					TwinGripVR::EquipManager::s_suppressDrawSound = true;
+					FalseEdgeVR::EquipManager::s_suppressDrawSound = true;
 					
 					// Temporarily strip enchantment to prevent enchant VFX/sound
 					TESObjectWEAP* weap = DYNAMIC_CAST(itemForm, TESForm, TESObjectWEAP);
@@ -270,7 +333,7 @@ namespace TwinGripVR
 						weap->enchantable.enchantment = nullptr;
 					}
 
-					CALL_MEMBER_FN(equipMan, EquipItem)(player, itemForm, nullptr, 1, leftSlot, false, true, false, nullptr);
+					FalseEdgeVR::EquipManager::GetSingleton()->EquipWeaponToGameHand(player, itemForm, true);
 
 					// Restore enchantment immediately
 					if (weap && cachedEnchant)
@@ -278,16 +341,13 @@ namespace TwinGripVR
 						weap->enchantable.enchantment = cachedEnchant;
 					}
 					
-					TwinGripVR::EquipManager::s_suppressDrawSound = false;
-					_MESSAGE("[ReequipCheck] Re-equipped weapon to LEFT hand (silent)");
+					FalseEdgeVR::EquipManager::s_suppressDrawSound = false;
 				}
 				
 				// Check RIGHT hand
 				if (m_rightHadWeapon && !rightStillHasWeapon)
 				{
-					_MESSAGE("[ReequipCheck] RIGHT hand weapon was unequipped - re-equipping!");
-					BGSEquipSlot* rightSlot = GetRightHandSlot();
-					TwinGripVR::EquipManager::s_suppressDrawSound = true;
+					FalseEdgeVR::EquipManager::s_suppressDrawSound = true;
 					// Temporarily strip enchantment to prevent enchant VFX/sound
 					TESObjectWEAP* weap2 = DYNAMIC_CAST(itemForm, TESForm, TESObjectWEAP);
 					EnchantmentItem* cachedEnchant2 = nullptr;
@@ -297,15 +357,14 @@ namespace TwinGripVR
 						weap2->enchantable.enchantment = nullptr;
 					}
 
-					CALL_MEMBER_FN(equipMan, EquipItem)(player, itemForm, nullptr, 1, rightSlot, false, true, false, nullptr);
+					FalseEdgeVR::EquipManager::GetSingleton()->EquipWeaponToGameHand(player, itemForm, false);
 
 					// Restore enchantment immediately
 					if (weap2 && cachedEnchant2)
 					{
 						weap2->enchantable.enchantment = cachedEnchant2;
 					}
-					TwinGripVR::EquipManager::s_suppressDrawSound = false;
-					_MESSAGE("[ReequipCheck] Re-equipped weapon to RIGHT hand (silent)");
+					FalseEdgeVR::EquipManager::s_suppressDrawSound = false;
 				}
 			}
 		}
@@ -347,8 +406,6 @@ namespace TwinGripVR
 			bool leftHadWeapon = (leftEquippedBefore && leftEquippedBefore->formID == m_itemFormId);
 			bool rightHadWeapon = (rightEquippedBefore && rightEquippedBefore->formID == m_itemFormId);
 			
-			_MESSAGE("[DelayedRemove] Before removal - Left equipped: %s, Right equipped: %s",
-				leftHadWeapon ? "YES" : "NO", rightHadWeapon ? "YES" : "NO");
 
 			// Get container changes to check inventory
 			ExtraContainerChanges* containerChanges = static_cast<ExtraContainerChanges*>(
@@ -356,7 +413,6 @@ namespace TwinGripVR
 			
 			if (!containerChanges || !containerChanges->data)
 			{
-				_MESSAGE("[DelayedRemove] No container changes data");
 				return;
 			}
 
@@ -364,7 +420,6 @@ namespace TwinGripVR
 			InventoryEntryData* entryData = containerChanges->data->FindItemEntry(itemForm);
 			if (!entryData)
 			{
-				_MESSAGE("[DelayedRemove] Item %08X not found in inventory", m_itemFormId);
 				return;
 			}
 
@@ -379,8 +434,6 @@ namespace TwinGripVR
 			// Only remove if we have MORE than what's equipped
 			if (totalCount > equippedCount)
 			{
-				_MESSAGE("[DelayedRemove] Removing 1x %08X from inventory (total: %d, equipped: %d)", 
-					m_itemFormId, totalCount, equippedCount);
 				RemoveItemFromInventory(player, itemForm, 1, true);
 				
 				// Schedule a follow-up task to check and re-equip after the game processes the removal
@@ -389,13 +442,10 @@ namespace TwinGripVR
 				if (g_task)
 				{
 					g_task->AddTask(new DelayedReequipCheckTask(m_itemFormId, leftHadWeapon, rightHadWeapon));
-					_MESSAGE("[DelayedRemove] Scheduled re-equip check task");
 				}
 			}
 			else
 			{
-				_MESSAGE("[DelayedRemove] NOT removing %08X - would remove equipped item (total: %d, equipped: %d)", 
-					m_itemFormId, totalCount, equippedCount);
 			}
 		}
 
@@ -456,7 +506,6 @@ namespace TwinGripVR
 		if (g_task)
 		{
 			g_task->AddTask(new FrameDelayedRemoveItemTask(itemFormId, frames));
-			_MESSAGE("[DelayedRemove] Scheduled frame-based removal for item %08X (%d frames, ~%dms)", itemFormId, frames, delayMs);
 		}
 		else
 		{
@@ -491,7 +540,6 @@ namespace TwinGripVR
 		
 		static BSFixedString s_blockStart("blockStart");
 		get_vfunc<_IAnimationGraphManagerHolder_NotifyAnimationGraph>(&player->animGraphHolder, 0x1)(&player->animGraphHolder, s_blockStart);
-		_MESSAGE("[Blocking] Started blocking (X-Pose)");
 	}
 	
 	void StopBlocking()
@@ -505,7 +553,6 @@ namespace TwinGripVR
 		
 		static BSFixedString s_blockStop("blockStop");
 		get_vfunc<_IAnimationGraphManagerHolder_NotifyAnimationGraph>(&player->animGraphHolder, 0x1)(&player->animGraphHolder, s_blockStop);
-		_MESSAGE("[Blocking] Stopped blocking (X-Pose ended)");
 	}
 	
 	bool IsBlocking()
@@ -585,8 +632,6 @@ namespace TwinGripVR
 		static bool loggedOnce = false;
 		if (!loggedOnce)
 		{
-			_MESSAGE("GetCollisionAvoidanceHandIsLeft: INI setting=%d, returning %s game hand, IsLeftHandedMode=%s",
-				collisionAvoidanceHand, result ? "LEFT" : "RIGHT", IsLeftHandedMode() ? "YES" : "NO");
 			loggedOnce = true;
 		}
 		
@@ -601,17 +646,11 @@ namespace TwinGripVR
 		// This function is called during DataLoaded, before HIGGS is ready
 		// Only do non-HIGGS dependent initialization here
 		
-		LOG("StartMod: TwinGripVR starting...");
+		LOG("StartMod: FalseEdgeVR starting...");
 		
 		// Log initial left-handed mode
-		_MESSAGE("==============================================");
-		_MESSAGE("[LeftHandedMode] VR Controller Mode: %s", IsLeftHandedMode() ? "LEFT-HANDED" : "RIGHT-HANDED (default)");
 		if (IsLeftHandedMode())
 		{
-			_MESSAGE("[LeftHandedMode] NOTE: In left-handed mode, VR controllers are inverted!");
-			_MESSAGE("[LeftHandedMode]   Left VR controller  -> Right game hand");
-			_MESSAGE("[LeftHandedMode]   Right VR controller -> Left game hand");
 		}
-		_MESSAGE("==============================================");
 	}
 }

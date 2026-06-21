@@ -1,7 +1,7 @@
-﻿#include "config.h"
+#include "config.h"
 #include "skse64/GameData.h"
 
-namespace TwinGripVR {
+namespace FalseEdgeVR {
 
 	static UInt32 ParseHexFormID(const std::string& value)
 	{
@@ -86,6 +86,7 @@ namespace TwinGripVR {
 
 	// Trigger-based weapon hold settings
 	float triggerUnequipDelay = 0.1f;     // Delay (seconds) after trigger release before unequipping (100ms default)
+	bool tapThenHoldGrabEquip = false;    // Off by default: simple hold equips grabbed weapon
 
 	// Intentional drop settings (grip spam detection)
 	int gripSpamThreshold = 4;       // Number of grip releases to trigger intentional drop
@@ -128,7 +129,7 @@ namespace TwinGripVR {
 
 		if (!runtimeDirectory.empty()) 
 		{
-			std::string filepath = runtimeDirectory + "Data\\SKSE\\Plugins\\TwinGripVR.ini";
+			std::string filepath = runtimeDirectory + "Data\\SKSE\\Plugins\\FalseEdgeVR.ini";
 			std::ifstream file(filepath);
 
 			if (!file.is_open()) 
@@ -225,6 +226,10 @@ namespace TwinGripVR {
 						if (variableName == "UnequipDelay")
 						{
 							triggerUnequipDelay = std::stof(variableValueStr);
+						}
+						else if (variableName == "TapThenHoldGrabEquip")
+						{
+							tapThenHoldGrabEquip = (std::stoi(variableValueStr) != 0);
 						}
 					}
 					else if (currentSection == "IntentionalDrop")
@@ -361,29 +366,6 @@ namespace TwinGripVR {
 			}
 
 			_MESSAGE("Config loaded successfully.");
-			_MESSAGE("BladeCollision settings:");
-			_MESSAGE("  CollisionThreshold=%.2f, ImminentThreshold=%.2f, ImminentThresholdBackup=%.2f",
-				bladeCollisionThreshold, bladeImminentThreshold, bladeImminentThresholdBackup);
-			_MESSAGE("  TimeToCollisionThreshold=%.3f, ReequipCooldown=%.3f, SwingVelocityThreshold=%.1f",
-				bladeTimeToCollisionThreshold, bladeReequipCooldown, swingVelocityThreshold);
-			_MESSAGE("  CollisionAvoidanceHand=%d (%s hand unequips during dual-wield collision)",
-				collisionAvoidanceHand, collisionAvoidanceHand == 0 ? "LEFT" : "RIGHT");
-			_MESSAGE("AutoEquip settings: Enabled=%s, Delay=%.2f",
-				autoEquipGrabbedWeaponEnabled ? "true" : "false", autoEquipGrabbedWeaponDelay);
-			_MESSAGE("TriggerHold settings: UnequipDelay=%.3f",
-				triggerUnequipDelay);
-			_MESSAGE("IntentionalDrop settings: GripSpamThreshold=%d, GripSpamWindow=%.1f, DropProtectionDisableTime=%.1f",
-				gripSpamThreshold, gripSpamWindow, dropProtectionDisableTime);
-			_MESSAGE("WeaponLock settings: SpamThreshold=%d, SpamWindow=%.1f",
-				triggerSpamThreshold, triggerSpamWindow);
-			_MESSAGE("WeaponSpawn settings: Distance=%.1f, OffsetX=%.1f, OffsetY=%.1f, OffsetZ=%.1f",
-				spawnDistance, spawnOffsetX, spawnOffsetY, spawnOffsetZ);
-			_MESSAGE("WeaponSpawnMounted settings: OffsetX=%.1f, OffsetY=%.1f, OffsetZ=%.1f",
-				spawnOffsetMountedX, spawnOffsetMountedY, spawnOffsetMountedZ);
-			_MESSAGE("ShieldBash settings: Enabled=%s, BashThreshold=%d, BashWindow=%.1f, LockoutDuration=%.0f",
-				shieldBashEnabled ? "true" : "false", shieldBashThreshold, shieldBashWindow, shieldBashLockoutDuration);
-			_MESSAGE("General settings: EquipGraceFrames=%d", equipGraceFrames);
-			_MESSAGE("WeaponExclusions: %u entries", static_cast<unsigned>(weaponExclusionEntries.size()));
 			return;
 		}
 		return;

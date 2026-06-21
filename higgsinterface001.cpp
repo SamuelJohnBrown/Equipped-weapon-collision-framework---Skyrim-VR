@@ -20,16 +20,9 @@ HiggsPluginAPI::IHiggsInterface001 * HiggsPluginAPI::GetHiggsInterface001(const 
 
 	// Dispatch a message to get the plugin interface from HIGGS
 	HiggsMessage higgsMessage;
-	if(messagingInterface->Dispatch(pluginHandle, HiggsMessage::kMessage_GetInterface, (void*)&higgsMessage, sizeof(HiggsMessage*), "HIGGS"))
-	{
-		_MESSAGE("Higgs dispatch message returned true...");
-	}
-	else
-	{
-		_MESSAGE("Higgs dispatch message returned false...");
-	}
+	messagingInterface->Dispatch(pluginHandle, HiggsMessage::kMessage_GetInterface, (void*)&higgsMessage, sizeof(HiggsMessage*), "HIGGS");
 	
-	if (!higgsMessage.GetApiFunction) 
+	if (!higgsMessage.GetApiFunction)
 	{
 		return nullptr;
 	}

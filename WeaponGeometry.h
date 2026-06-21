@@ -8,7 +8,7 @@
 #include "config.h"
 #include "EquipManager.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
     // Represents the blade geometry data for a weapon
     struct BladeGeometry

@@ -1,13 +1,15 @@
-﻿#include "ActivateHook.h"
+#include "ActivateHook.h"
 #include "EquipManager.h"
 #include "Engine.h"
 #include "VRInputHandler.h"
 #include "config.h"
 #include "skse64/GameReferences.h"
 #include "skse64/GameRTTI.h"
+#include "skse64/GameData.h"
 #include "skse64_common/SafeWrite.h"
+#include <cstring>
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
     // Forward declaration from VRInputHandler.cpp
     bool IsControllerInShoulderZone(bool isLeftVRController);
@@ -24,6 +26,112 @@ namespace TwinGripVR
     
     // Bypass flag - our code sets this to true before calling activate
     bool g_bypassActivateBlock = false;
+
+    typedef void (*_EquipManager_EquipItem)(::EquipManager*, Actor*, TESForm*, BaseExtraList*, SInt32, BGSEquipSlot*, bool, bool, bool, void*);
+    _EquipManager_EquipItem OriginalEquipItem = nullptr;
+  
+    // ============================================
+    // Helper Functions
+    // ============================================
+
+    static int AnalyzeFunctionPrologSize(unsigned char* funcStart)
+    {
+        int prologSize = 0;
+        for (int i = 0; i < 20 && prologSize < 14; )
+        {
+            unsigned char b = funcStart[i];
+
+            if (b >= 0x40 && b <= 0x4F)
+            {
+                unsigned char nextB = funcStart[i + 1];
+
+                if (nextB >= 0x50 && nextB <= 0x57)
+                {
+                    prologSize += 2;
+                    i += 2;
+                    continue;
+                }
+                else if (nextB == 0x83 || nextB == 0x81)
+                {
+                    if (nextB == 0x83)
+                    {
+                        prologSize += 4;
+                        i += 4;
+                    }
+                    else
+                    {
+                        prologSize += 7;
+                        i += 7;
+                    }
+                    continue;
+                }
+                else if (nextB == 0x89 || nextB == 0x8B)
+                {
+                    prologSize += 5;
+                    i += 5;
+                    continue;
+                }
+                else if (nextB == 0x8D)
+                {
+                    prologSize += 5;
+                    i += 5;
+                    continue;
+                }
+                else
+                {
+                    prologSize += 2;
+                    i += 2;
+                    continue;
+                }
+            }
+            else if (b >= 0x50 && b <= 0x57)
+            {
+                prologSize += 1;
+                i += 1;
+                continue;
+            }
+            else
+            {
+                break;
+            }
+        }
+
+        if (prologSize < 5)
+            prologSize = 14;
+
+        return prologSize;
+    }
+
+    static bool InstallDetourHook(uintptr_t funcAddr, void* hookFunc, void** outTrampolineFunc, const char* hookName)
+    {
+        unsigned char* funcStart = (unsigned char*)funcAddr;
+        int prologSize = AnalyzeFunctionPrologSize(funcStart);
+
+        void* trampMem = g_localTrampoline.Allocate(prologSize + 14);
+        if (!trampMem)
+        {
+            _MESSAGE("%s: ERROR - Failed to allocate trampoline memory!", hookName);
+            return false;
+        }
+
+        unsigned char* tramp = (unsigned char*)trampMem;
+        memcpy(tramp, funcStart, prologSize);
+
+        int offset = prologSize;
+        tramp[offset++] = 0xFF;
+        tramp[offset++] = 0x25;
+        tramp[offset++] = 0x00;
+        tramp[offset++] = 0x00;
+        tramp[offset++] = 0x00;
+        tramp[offset++] = 0x00;
+
+        uintptr_t jumpBack = funcAddr + prologSize;
+        memcpy(&tramp[offset], &jumpBack, 8);
+
+        *outTrampolineFunc = trampMem;
+        g_branchTrampoline.Write5Branch(funcAddr, (uintptr_t)hookFunc);
+        return true;
+    }
   
     // ============================================
     // Helper Functions
@@ -89,8 +197,6 @@ return false;
         {
             if (VRInputHandler::IsDropProtectionDisabled(isLeftVRController))
             {
-                _MESSAGE("ShouldBlockActivation: Drop protection DISABLED for %s VR controller - allowing drop",
-                    isLeftVRController ? "LEFT" : "RIGHT");
                 return false;  // Don't block - player wants to drop
             }
 
@@ -100,8 +206,6 @@ return false;
             // ============================================
             if (IsControllerInShoulderZone(isLeftVRController))
             {
-                _MESSAGE("ShouldBlockActivation: %s VR controller is in SHOULDER ZONE - allowing activation (holster)",
-                    isLeftVRController ? "LEFT" : "RIGHT");
                 return false;  // Don't block - player is holstering
             }
         }
@@ -113,7 +217,6 @@ return false;
         
       if (activatee == droppedLeft || activatee == droppedRight)
         {
-     _MESSAGE("ShouldBlockActivation: Weapon is from trigger system - blocking activation");
  return true;  // Block - this weapon is managed by our trigger system
    }
         
@@ -147,22 +250,42 @@ return false;
             bool isPlayer = (player && activator == player);
     bool isGrabbed = IsObjectGrabbedByHiggs(activatee);
  
-            _MESSAGE("ActivateHook: Weapon activation - FormID: %08X, IsPlayer: %s, IsGrabbed: %s",
-       activatee->formID,
-   isPlayer ? "YES" : "NO",
-        isGrabbed ? "YES" : "NO");
   }
     
   // Check if we should block this activation
         if (ShouldBlockActivation(activatee, activator))
         {
-            _MESSAGE("ActivateHook: BLOCKED player from activating grabbed weapon (FormID: %08X)",
-     activatee ? activatee->formID : 0);
     return false;  // Block activation
       }
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (player && activator == player && activatee && activatee->baseForm &&
+            activatee->baseForm->formType == kFormType_Door && !g_bypassActivateBlock)
+        {
+            NotifyDoorOrTransitionActivated();
+        }
         
         // Allow activation
         return OriginalActivate(activatee, activator, unk01, unk02, count, defaultProcessingOnly);
+    }
+
+    void __fastcall EquipItemHook(::EquipManager* thisPtr, Actor* actor, TESForm* item, BaseExtraList* extraData, SInt32 count, BGSEquipSlot* equipSlot, bool withEquipSound, bool preventUnequip, bool showMsg, void* unk)
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (player && actor == player && item && equipSlot && EquipManager::IsWeapon(item))
+        {
+            BGSEquipSlot* leftSlot = GetLeftHandSlot();
+            BGSEquipSlot* rightSlot = GetRightHandSlot();
+            if (leftSlot && rightSlot && (equipSlot == leftSlot || equipSlot == rightSlot))
+            {
+                bool isLeftHand = (equipSlot == leftSlot);
+                EquipManager* mgr = EquipManager::GetSingleton();
+                if (mgr->HasConflictingGrabbedWeaponInHand(isLeftHand, item))
+                    mgr->SchedulePickUpGrabbedWeaponBeforeEquip(isLeftHand);
+            }
+        }
+
+        OriginalEquipItem(thisPtr, actor, item, extraData, count, equipSlot, withEquipSound, preventUnequip, showMsg, unk);
     }
     
     // ============================================
@@ -171,6 +294,13 @@ return false;
     
     bool SafeActivate(TESObjectREFR* activatee, TESObjectREFR* activator, UInt32 unk01, UInt32 unk02, UInt32 count, bool defaultProcessingOnly)
     {
+        TESForm* pickedUpWeaponForm = nullptr;
+        if (activatee && activatee->baseForm && activatee->baseForm->formType == kFormType_Weapon)
+        {
+            pickedUpWeaponForm = activatee->baseForm;
+            SetOwnerToPlayer(activatee);
+        }
+
       // Set bypass flag
   g_bypassActivateBlock = true;
       
@@ -179,6 +309,9 @@ return false;
         
         // Clear bypass flag
         g_bypassActivateBlock = false;
+
+        if (result && pickedUpWeaponForm && activator == *g_thePlayer)
+            EnsurePlayerOwnsWeaponInInventory(static_cast<PlayerCharacter*>(activator), pickedUpWeaponForm);
         
      return result;
 }
@@ -189,133 +322,23 @@ return false;
     
     void SetupActivateHook()
     {
-        _MESSAGE("SetupActivateHook: Initializing Activate Hook...");
-        
         uintptr_t funcAddr = OriginalActivateFunc.GetUIntPtr();
-        _MESSAGE("SetupActivateHook: Activate function address: 0x%llX", funcAddr);
-   
-        // Log first bytes for debugging
-        unsigned char* funcStart = (unsigned char*)funcAddr;
-        _MESSAGE("SetupActivateHook: First 16 bytes: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
-     funcStart[0], funcStart[1], funcStart[2], funcStart[3],
-     funcStart[4], funcStart[5], funcStart[6], funcStart[7],
-            funcStart[8], funcStart[9], funcStart[10], funcStart[11],
-   funcStart[12], funcStart[13], funcStart[14], funcStart[15]);
-    
-    // Store original function address (before we overwrite it)
-        OriginalActivate = (_TESObjectREFR_Activate)funcAddr;
-        
-        // Analyze prolog to determine safe size to copy
-        int prologSize = 0;
- for (int i = 0; i < 20 && prologSize < 14; )
-        {
-  unsigned char b = funcStart[i];
-     
-      // REX prefix (40-4F)
-    if (b >= 0x40 && b <= 0x4F)
-    {
- unsigned char nextB = funcStart[i + 1];
-    
-   // REX + push (50-57)
- if (nextB >= 0x50 && nextB <= 0x57)
-       {
-    prologSize += 2;
-       i += 2;
-        continue;
-    }
-           // REX + sub rsp
-      else if (nextB == 0x83 || nextB == 0x81)
-   {
-        if (nextB == 0x83) // imm8
-       {
-      prologSize += 4;
-            i += 4;
-            }
-       else // imm32
-    {
-          prologSize += 7;
-      i += 7;
-     }
-          continue;
-        }
-       // REX + mov
-    else if (nextB == 0x89 || nextB == 0x8B)
-   {
-           prologSize += 5;
-        i += 5;
-  continue;
-      }
-    // REX + lea
-       else if (nextB == 0x8D)
-         {
-         prologSize += 5;
-        i += 5;
-      continue;
- }
-                else
-     {
-prologSize += 2;
-          i += 2;
-                 continue;
-            }
-            }
-          // Single byte push (50-57)
-  else if (b >= 0x50 && b <= 0x57)
-            {
-       prologSize += 1;
-                i += 1;
-                continue;
-  }
-  // Unknown - break
-       else
-    {
-       break;
-     }
-        }
-        
-    _MESSAGE("SetupActivateHook: Detected prolog size: %d bytes", prologSize);
-        
-   // Ensure minimum size for our jump
-        if (prologSize < 5)
-        {
-    _MESSAGE("SetupActivateHook: WARNING - Prolog too small, using 14 bytes");
-  prologSize = 14;
-        }
-      
-        // Allocate trampoline memory
-    void* trampMem = g_localTrampoline.Allocate(prologSize + 14);
-        if (!trampMem)
- {
-  _MESSAGE("SetupActivateHook: ERROR - Failed to allocate trampoline memory!");
-   return;
- }
-        
-        unsigned char* tramp = (unsigned char*)trampMem;
-        
-        // Copy the original prolog bytes
-        memcpy(tramp, funcStart, prologSize);
-        
-        // Add jump back to original function + prologSize
-    int offset = prologSize;
-    tramp[offset++] = 0xFF;  // JMP [rip+0]
-        tramp[offset++] = 0x25;
-        tramp[offset++] = 0x00;
-  tramp[offset++] = 0x00;
- tramp[offset++] = 0x00;
-        tramp[offset++] = 0x00;
-        
-     uintptr_t jumpBack = funcAddr + prologSize;
-  memcpy(&tramp[offset], &jumpBack, 8);
-     
-        // Update OriginalActivate to point to trampoline
-        OriginalActivate = (_TESObjectREFR_Activate)trampMem;
-      
-        _MESSAGE("SetupActivateHook: Trampoline at 0x%llX, jumps back to 0x%llX", (uintptr_t)trampMem, jumpBack);
-        _MESSAGE("SetupActivateHook: Copied %d bytes to trampoline", prologSize);
-        
-        // Write jump at original function to our hook
-     g_branchTrampoline.Write5Branch(funcAddr, (uintptr_t)ActivateHook);
+        void* trampoline = nullptr;
 
-        _MESSAGE("SetupActivateHook: Hook installed successfully!");
+        if (InstallDetourHook(funcAddr, (void*)ActivateHook, &trampoline, "SetupActivateHook"))
+            OriginalActivate = (_TESObjectREFR_Activate)trampoline;
+    }
+
+    void SetupEquipItemHook()
+    {
+        RelocAddr<uintptr_t> equipItemAddr(0x00640A90);
+        uintptr_t funcAddr = equipItemAddr.GetUIntPtr();
+        void* trampoline = nullptr;
+
+        if (InstallDetourHook(funcAddr, (void*)EquipItemHook, &trampoline, "SetupEquipItemHook"))
+        {
+            OriginalEquipItem = (_EquipManager_EquipItem)trampoline;
+            _MESSAGE("SetupEquipItemHook: EquipItem hook installed");
+        }
     }
 }

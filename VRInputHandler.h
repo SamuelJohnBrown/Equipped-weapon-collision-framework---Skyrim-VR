@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include "skse64/GameReferences.h"
 #include "skse64/PapyrusEvents.h"
@@ -6,7 +6,7 @@
 #include "EquipManager.h"
 #include "config.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
     // VR Input handler for tracking controller/hand events
     class VRInputHandler
@@ -161,4 +161,15 @@ float m_leftHandCooldownTimer = 0.0f;
 
     // Convenience function
     void InitializeVRInput();
+
+    // True while a door/cell transition guard window is active (force-equip grabbed weapons).
+    bool IsDoorTransitionGuardActive();
+
+    // Block holster-to-grab during door guard or blocking menus (not general input).
+    bool IsWeaponGrabToHolsterBlocked();
+
+    // Call when the player activates a door (or similar cell-loading ref).
+    void NotifyDoorOrTransitionActivated();
+
+    void UpdateWeaponTransitionGuard(float deltaTime);
 }

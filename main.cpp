@@ -1,4 +1,4 @@
-﻿#include "skse64_common/skse_version.h"
+#include "skse64_common/skse_version.h"
 #include <shlobj.h>
 #include <intrin.h>
 #include <string>
@@ -16,7 +16,7 @@
 
 #include "skse64_common/BranchTrampoline.h"
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
 	static SKSEMessagingInterface* g_messaging = NULL;
 	PluginHandle					g_pluginHandle = kPluginHandle_Invalid;
@@ -53,6 +53,7 @@ namespace TwinGripVR
 			static BSFixedString bookMenu("Book Menu");
 			static BSFixedString sleepWaitMenu("Sleep/Wait Menu");
 			static BSFixedString loadingMenu("Loading Menu");
+			static BSFixedString faderMenu("Fader Menu");
 			static BSFixedString journalMenu("Journal Menu");
 			static BSFixedString mapMenu("MapMenu");
 			static BSFixedString inventoryMenu("InventoryMenu");
@@ -72,6 +73,7 @@ namespace TwinGripVR
 				evn->menuName == bookMenu ||          // Reading books
 				evn->menuName == sleepWaitMenu ||     // Sleep/Wait
 				evn->menuName == loadingMenu ||       // Loading screen
+				evn->menuName == faderMenu ||         // Cell transition fade
 				evn->menuName == journalMenu ||       // Journal/Quest menu
 				evn->menuName == mapMenu ||           // Map
 				evn->menuName == inventoryMenu ||     // Inventory
@@ -85,12 +87,10 @@ namespace TwinGripVR
 			{
 				if (evn->opening)
 				{
-					_MESSAGE("MenuEventHandler: === PAUSING VR TRACKING === Menu: %s", evn->menuName.data);
 					VRInputHandler::GetSingleton()->PauseTracking(true);
 				}
 				else
 				{
-					_MESSAGE("MenuEventHandler: === RESUMING VR TRACKING === Menu: %s", evn->menuName.data);
 					VRInputHandler::GetSingleton()->PauseTracking(false);
 				}
 				
@@ -109,12 +109,10 @@ namespace TwinGripVR
 					{
 						if (evn->opening)
 						{
-							_MESSAGE("MenuEventHandler: Pausing VR tracking (flag) - Menu: %s", evn->menuName.data);
 							VRInputHandler::GetSingleton()->PauseTracking(true);
 						}
 						else
 						{
-							_MESSAGE("MenuEventHandler: Resuming VR tracking (flag) - Menu: %s", evn->menuName.data);
 							VRInputHandler::GetSingleton()->PauseTracking(false);
 						}
 					}
@@ -125,9 +123,7 @@ namespace TwinGripVR
 			BSFixedString mainMenu("Main Menu");
 			if (evn->menuName == mainMenu && !evn->opening)
 			{
-				_MESSAGE("=== Main Menu Closed - Hot reloading config ===");
-				TwinGripVR::loadConfig();
-				_MESSAGE("=== Config hot reload complete ===");
+				FalseEdgeVR::loadConfig();
 			}
 
 			return kEvent_Continue;
@@ -158,7 +154,6 @@ namespace TwinGripVR
 			Actor* actor = DYNAMIC_CAST(evn->source, TESObjectREFR, Actor);
 			if (actor && actor == *g_thePlayer)
 			{
-				_MESSAGE("DeathEventHandler: Player died! Clearing all VR tracking state.");
 				VRInputHandler::GetSingleton()->ClearAllState();
 			}
 
@@ -195,10 +190,6 @@ namespace TwinGripVR
 				return kEvent_Continue;
 
 			bool isLeftHand = (evn->slot == SKSEActionEvent::kSlot_Left);
-			
-			_MESSAGE("WeaponSwingEventHandler: WEAPON SWING detected! Hand: %s, Weapon FormID: %08X",
-				isLeftHand ? "LEFT" : "RIGHT",
-				evn->sourceForm ? evn->sourceForm->formID : 0);
 
 			// Notify VRInputHandler
 			VRInputHandler::GetSingleton()->OnWeaponSwing(isLeftHand, evn->sourceForm);
@@ -214,6 +205,67 @@ namespace TwinGripVR
 
 	private:
 		WeaponSwingEventHandler() = default;
+	};
+
+	// ============================================
+	// Weapon Sheathe Event Handler - Block sheathing while weapons stay equipped
+	// ============================================
+	class WeaponSheatheEventHandler : public BSTEventSink<SKSEActionEvent>
+	{
+	public:
+		virtual EventResult ReceiveEvent(SKSEActionEvent* evn, EventDispatcher<SKSEActionEvent>* dispatcher) override
+		{
+			if (!evn)
+				return kEvent_Continue;
+
+			if (!evn->actor || evn->actor != *g_thePlayer)
+				return kEvent_Continue;
+
+			if (evn->type != SKSEActionEvent::kType_BeginSheathe &&
+				evn->type != SKSEActionEvent::kType_EndSheathe)
+				return kEvent_Continue;
+
+			PlayerCharacter* player = *g_thePlayer;
+			if (!player)
+				return kEvent_Continue;
+
+			TESForm* leftEquipped = player->GetEquippedObject(true);
+			TESForm* rightEquipped = player->GetEquippedObject(false);
+			bool hasEquippedWeapon =
+				(leftEquipped && EquipManager::IsWeapon(leftEquipped)) ||
+				(rightEquipped && EquipManager::IsWeapon(rightEquipped));
+
+			if (!hasEquippedWeapon)
+				return kEvent_Continue;
+
+			if (leftEquipped && EquipManager::IsWeapon(leftEquipped))
+			{
+				const char* weaponName = leftEquipped->GetName();
+				_MESSAGE("[FalseEdgeVR] Weapon redrawn in LEFT game hand: %s (0x%08X)",
+					weaponName ? weaponName : "(unnamed)", leftEquipped->formID);
+			}
+			if (rightEquipped && EquipManager::IsWeapon(rightEquipped))
+			{
+				const char* weaponName = rightEquipped->GetName();
+				_MESSAGE("[FalseEdgeVR] Weapon redrawn in RIGHT game hand: %s (0x%08X)",
+					weaponName ? weaponName : "(unnamed)", rightEquipped->formID);
+			}
+
+			EquipManager::s_suppressDrawSound = true;
+			player->DrawSheatheWeapon(true);
+			EquipManager::s_suppressDrawSound = false;
+
+			return kEvent_Continue;
+		}
+
+		static WeaponSheatheEventHandler* GetSingleton()
+		{
+			static WeaponSheatheEventHandler instance;
+			return &instance;
+		}
+
+	private:
+		WeaponSheatheEventHandler() = default;
 	};
 
 	// ============================================
@@ -233,21 +285,6 @@ namespace TwinGripVR
 
 			TESForm* sourceForm = evn->sourceFormID ? LookupFormByID(evn->sourceFormID) : nullptr;
 			
-			bool isPowerAttack = (evn->flags & TESHitEvent::kFlag_PowerAttack) != 0;
-			bool isSneakAttack = (evn->flags & TESHitEvent::kFlag_SneakAttack) != 0;
-			bool isBash = (evn->flags & TESHitEvent::kFlag_Bash) != 0;
-			bool isBlocked = (evn->flags & TESHitEvent::kFlag_Blocked) != 0;
-			
-			_MESSAGE("HitEventHandler: === PLAYER HIT EVENT ===");
-			_MESSAGE("HitEventHandler:   Target: %08X, Source Weapon: %08X", 
-				evn->target ? evn->target->formID : 0,
-				evn->sourceFormID);
-			_MESSAGE("HitEventHandler:   Flags: PowerAttack=%s, SneakAttack=%s, Bash=%s, Blocked=%s",
-				isPowerAttack ? "YES" : "NO",
-				isSneakAttack ? "YES" : "NO",
-				isBash ? "YES" : "NO",
-				isBlocked ? "YES" : "NO");
-			
 			// Determine which hand based on the weapon
 			PlayerCharacter* player = *g_thePlayer;
 			if (player && sourceForm)
@@ -256,8 +293,6 @@ namespace TwinGripVR
 				TESForm* rightEquipped = player->GetEquippedObject(false);
 				
 				bool isLeftHand = (leftEquipped && leftEquipped->formID == sourceForm->formID);
-				
-				_MESSAGE("HitEventHandler:   Hand: %s", isLeftHand ? "LEFT" : "RIGHT");
 				
 				// Notify VRInputHandler of the hit/swing
 				VRInputHandler::GetSingleton()->OnWeaponSwing(isLeftHand, sourceForm);
@@ -278,8 +313,6 @@ namespace TwinGripVR
 
 	void SetupReceptors()
 	{
-		_MESSAGE("Building Event Sinks...");
-
 		// Register equip event handler
 		RegisterEquipEventHandler();
 		
@@ -288,64 +321,41 @@ namespace TwinGripVR
 		if (eventDispatcher)
 		{
 			eventDispatcher->deathDispatcher.AddEventSink(DeathEventHandler::GetSingleton());
-			_MESSAGE("Death event handler registered");
-			
-			// Register hit event handler
 			eventDispatcher->unk630.AddEventSink(HitEventHandler::GetSingleton());
-			_MESSAGE("Hit event handler registered");
 		}
 		
-		// Register weapon swing event handler (SKSE action events)
 		g_actionEventDispatcher.AddEventSink(WeaponSwingEventHandler::GetSingleton());
-		_MESSAGE("Weapon swing event handler registered");
+		g_actionEventDispatcher.AddEventSink(WeaponSheatheEventHandler::GetSingleton());
 		
-		// Register menu event handler for hot reloading config
 		MenuManager* menuManager = MenuManager::GetSingleton();
 		if (menuManager)
 		{
 			menuManager->MenuOpenCloseEventDispatcher()->AddEventSink(MenuEventHandler::GetSingleton());
-			_MESSAGE("Menu event handler registered (config hot reload on main menu close)");
 		}
 	}
 
-	// Called after HIGGS interface is available
 	void InitializeVRSystems()
 	{
-		_MESSAGE("=== Initializing VR Systems ===");
-		
-		// Initialize VR input handling (HIGGS callbacks) - NOW higgsInterface is available
-		_MESSAGE("Calling InitializeVRInput...");
 		InitializeVRInput();
-		_MESSAGE("InitializeVRInput complete");
-		
-		// Initialize weapon geometry tracking
-		_MESSAGE("Calling InitializeWeaponGeometryTracker...");
 		InitializeWeaponGeometryTracker();
-		_MESSAGE("InitializeWeaponGeometryTracker complete");
-
-		// Update grab listening based on current equipment
-		_MESSAGE("Calling UpdateGrabListening...");
 		VRInputHandler::GetSingleton()->UpdateGrabListening();
-		_MESSAGE("UpdateGrabListening complete");
-		
-		_MESSAGE("=== VR Systems initialized successfully ===");
 	}
 
 	extern "C" {
 
 		bool SKSEPlugin_Query(const SKSEInterface* skse, PluginInfo* info) {
-			gLog.OpenRelative(CSIDL_MYDOCUMENTS, "\\My Games\\Skyrim VR\\SKSE\\TwinGripVR.log");
+			gLog.OpenRelative(CSIDL_MYDOCUMENTS, "\\My Games\\Skyrim VR\\SKSE\\FalseEdgeVR.log");
 			gLog.SetPrintLevel(IDebugLog::kLevel_Error);
 			gLog.SetLogLevel(IDebugLog::kLevel_DebugMessage);
 
-			std::string logMsg("TwinGripVR: ");
-			logMsg.append(TwinGripVR::MOD_VERSION_STR);
+			std::string logMsg("FalseEdgeVR: ");
+			logMsg.append(FalseEdgeVR::MOD_VERSION_STR);
 			_MESSAGE(logMsg.c_str());
 
 			// populate info structure
 			info->infoVersion = PluginInfo::kInfoVersion;
-			info->name = "TwinGripVR";
-			info->version = TwinGripVR::MOD_VERSION;
+			info->name = "FalseEdgeVR";
+			info->version = FalseEdgeVR::MOD_VERSION;
 
 			// store plugin handle so we can identify ourselves later
 			g_pluginHandle = skse->GetPluginHandle();
@@ -394,12 +404,12 @@ namespace TwinGripVR
 					SetupReceptors();
 				else if (msg->type == SKSEMessagingInterface::kMessage_DataLoaded)
 				{
-					TwinGripVR::loadConfig();
+					FalseEdgeVR::loadConfig();
 
 					// NEW SKSEVR feature: trampoline interface object from QueryInterface() - Use SKSE existing process code memory pool - allow Skyrim to run without ASLR
-					if (TwinGripVR::g_trampolineInterface)
+					if (FalseEdgeVR::g_trampolineInterface)
 					{
-						void* branch = TwinGripVR::g_trampolineInterface->AllocateFromBranchPool(g_pluginHandle, TRAMPOLINE_SIZE);
+						void* branch = FalseEdgeVR::g_trampolineInterface->AllocateFromBranchPool(g_pluginHandle, TRAMPOLINE_SIZE);
 						if (!branch) {
 							_ERROR("couldn't acquire branch trampoline from SKSE. this is fatal. skipping remainder of init process.");
 							return;
@@ -407,7 +417,7 @@ namespace TwinGripVR
 
 						g_branchTrampoline.SetBase(TRAMPOLINE_SIZE, branch);
 
-						void* local = TwinGripVR::g_trampolineInterface->AllocateFromLocalPool(g_pluginHandle, TRAMPOLINE_SIZE);
+						void* local = FalseEdgeVR::g_trampolineInterface->AllocateFromLocalPool(g_pluginHandle, TRAMPOLINE_SIZE);
 						if (!local) {
 							_ERROR("couldn't acquire codegen buffer from SKSE. this is fatal. skipping remainder of init process.");
 							return;
@@ -435,10 +445,11 @@ namespace TwinGripVR
 						_MESSAGE("Using legacy SKSE trampoline creation.");
 					}
 
-					TwinGripVR::GameLoad();
+					FalseEdgeVR::GameLoad();
 					
 					// Setup Activate hook to block player from activating grabbed weapons
 					SetupActivateHook();
+					SetupEquipItemHook();
 					
 					// Initialize equip manager early (doesn't need HIGGS)
 					EquipManager::GetSingleton()->Initialize();
@@ -448,16 +459,11 @@ namespace TwinGripVR
 				{
 					// Get HIGGS interface
 					higgsInterface = HiggsPluginAPI::GetHiggsInterface001(g_pluginHandle, g_messaging);
-					if (higgsInterface)
-					{
-						_MESSAGE("Got HIGGS interface. Buildnumber: %d", higgsInterface->GetBuildNumber());
-					}
-					else
+					if (!higgsInterface)
 					{
 						_MESSAGE("Did not get HIGGS interface - VR collision features will be disabled");
 					}
 
-					// Get VRIK interface
 					vrikInterface = vrikPluginApi::getVrikInterface001(g_pluginHandle, g_messaging);
 					if (vrikInterface)
 					{
@@ -466,43 +472,21 @@ namespace TwinGripVR
 						{
 							ShowErrorBoxAndTerminate("[CRITICAL] VRIK's older versions are not compatible. Make sure you have VRIK version 0.8.4 or higher.");
 						}
-						_MESSAGE("Got VRIK interface. Buildnumber: %d", vrikBuildNumber);
-					}
-					else
-					{
-						_MESSAGE("Did not get VRIK interface");
 					}
 
-					// Get SkyrimVRESL interface
 					skyrimVRESLInterface = SkyrimVRESLPluginAPI::GetSkyrimVRESLInterface001(g_pluginHandle, g_messaging);
-					if (skyrimVRESLInterface)
-					{
-						_MESSAGE("Got SkyrimVRESL interface");
-					}
-					else
-					{
-						_MESSAGE("Did not get SkyrimVRESL interface");
-					}
 
-					// NOW initialize VR systems that depend on HIGGS
 					InitializeVRSystems();
 				}
 				else if (msg->type == SKSEMessagingInterface::kMessage_PostLoadGame)
 				{
 					if ((bool)(msg->data) == true)
 					{
-						_MESSAGE("PostLoadGame: Clearing VR tracking state and updating equipment...");
-						
-						// Clear all VR tracking state first (old references are now invalid)
+						EquipManager::GetSingleton()->CaptureDroppedWeaponsForLoadRecovery();
 						VRInputHandler::GetSingleton()->ClearAllState();
-						
-						TwinGripVR::PostLoadGame();
-						
-						// Update equipment state after loading a save
+						FalseEdgeVR::PostLoadGame();
 						EquipManager::GetSingleton()->UpdateEquipmentState();
 						VRInputHandler::GetSingleton()->UpdateGrabListening();
-						
-						_MESSAGE("PostLoadGame: Complete");
 					}
 				}
 			}
@@ -522,6 +506,10 @@ namespace TwinGripVR
 				_MESSAGE("[CRITICAL] Couldn't get SKSE VR interface. You probably have an outdated SKSE version.");
 				return false;
 			}
+
+			SKSESerializationInterface* serialization = (SKSESerializationInterface*)skse->QueryInterface(kInterface_Serialization);
+			if (serialization)
+				EquipManager::RegisterSerialization(serialization);
 
 			return true;
 		}

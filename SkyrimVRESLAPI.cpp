@@ -168,7 +168,6 @@ UInt32 GetFullFormIdFromEspAndFormId(const char* espName, UInt32 baseFormId)
 			const ModInfo* modInfo = NEWLookupAllLoadedModByName(espName);
 			if (modInfo)
 			{
-				_MESSAGE("Modinfo %x - %x - %s", modInfo->modIndex, modInfo->lightIndex, modInfo->name);
 				if (IsValidModIndex(modInfo->modIndex)) //If plugin is in the load order.
 				{
 					fullFormID = GetFullFormID(modInfo, GetBaseFormID(baseFormId));

@@ -8,7 +8,7 @@
 #include <cmath>
 #include <cfloat>
 
-namespace TwinGripVR
+namespace FalseEdgeVR
 {
     // Static constant for blade radius (thickness)
     const float WeaponGeometryTracker::BLADE_RADIUS = 2.0f;  // Approximate blade thickness in units
@@ -47,10 +47,6 @@ m_geometryState.leftHand.Clear();
         m_collisionThreshold = bladeCollisionThreshold;
       m_imminentThreshold = bladeImminentThreshold;
         
-        _MESSAGE("WeaponGeometryTracker: Collision threshold: %.2f, Imminent threshold: %.2f", 
-            m_collisionThreshold, m_imminentThreshold);
-        _MESSAGE("WeaponGeometryTracker: Raycasting enabled with %d samples per blade, blade radius: %.2f",
-      RAYCAST_SAMPLES, BLADE_RADIUS);
         
         m_initialized = true;
 LOG("WeaponGeometryTracker: Initialized successfully");
@@ -72,7 +68,6 @@ LOG("WeaponGeometryTracker: Initialized successfully");
         // Log once to confirm update is being called
   if (!loggedOnce)
     {
-       _MESSAGE("WeaponGeometryTracker::Update - First update call!");
 loggedOnce = true;
         }
 
@@ -95,10 +90,6 @@ loggedOnce = true;
     
      if (currentLeftFormID != m_lastLeftWeaponFormID || currentRightFormID != m_lastRightWeaponFormID)
    {
-        _MESSAGE("WeaponGeometryTracker: Equipment changed! Left: %08X->%08X, Right: %08X->%08X",
-    m_lastLeftWeaponFormID, currentLeftFormID,
-    m_lastRightWeaponFormID, currentRightFormID);
-     _MESSAGE("WeaponGeometryTracker: Starting %d frame grace period before collision detection", equipGraceFrames);
             
             m_lastLeftWeaponFormID = currentLeftFormID;
    m_lastRightWeaponFormID = currentRightFormID;
@@ -128,10 +119,6 @@ m_framesSinceEquipChange = 0;
    handednessLogCounter++;
    if (handednessLogCounter % 500 == 1)
  {
-       _MESSAGE("WeaponGeometry: IsLeftHandedMode()=%s, offHandIsLeft=%s, offHandVRControllerIsLeft=%s",
-     IsLeftHandedMode() ? "YES" : "NO",
-  offHandIsLeft ? "YES" : "NO",
-           offHandVRControllerIsLeft ? "YES" : "NO");
    }
 
    if (EquipManager::GetSingleton()->HasPendingReequip(offHandIsLeft))
@@ -156,8 +143,6 @@ m_framesSinceEquipChange = 0;
    static bool loggedHiggsState = false;
    if (EquipManager::GetSingleton()->HasPendingReequip(offHandIsLeft) && !loggedHiggsState)
    {
-       _MESSAGE("WeaponGeometry: Pending reequip - DroppedRef: %p, HIGGS holding: %s",
-           higgsHeldOffHand, offHandHiggsGrabbed ? "YES" : "NO");
        loggedHiggsState = true;
    }
    
@@ -214,27 +199,11 @@ m_framesSinceEquipChange = 0;
             
   if (!loggedBothValid && !offHandHiggsGrabbed)
 {
-      _MESSAGE("WeaponGeometryTracker: Both hands have valid geometry!");
      loggedBothValid = true;
    }
   
   if (offHandHiggsGrabbed && !loggedHiggsTracking)
    {
-  _MESSAGE("WeaponGeometryTracker: Tracking HIGGS-grabbed weapon + equipped weapon");
-      _MESSAGE("  Left (HIGGS):  Base(%.1f, %.1f, %.1f) Tip(%.1f, %.1f, %.1f)",
-           m_geometryState.leftHand.basePosition.x,
-       m_geometryState.leftHand.basePosition.y,
-   m_geometryState.leftHand.basePosition.z,
-               m_geometryState.leftHand.tipPosition.x,
-    m_geometryState.leftHand.tipPosition.y,
-       m_geometryState.leftHand.tipPosition.z);
-  _MESSAGE("  Right (Equipped): Base(%.1f, %.1f, %.1f) Tip(%.1f, %.1f, %.1f)",
-     m_geometryState.rightHand.basePosition.x,
-   m_geometryState.rightHand.basePosition.y,
-         m_geometryState.rightHand.basePosition.z,
-   m_geometryState.rightHand.tipPosition.x,
-          m_geometryState.rightHand.tipPosition.y,
-         m_geometryState.rightHand.tipPosition.z);
            loggedHiggsTracking = true;
      }
      
@@ -252,8 +221,6 @@ m_wasInContact = m_bladesInContact;
           distanceLogCounter++;
              if (distanceLogCounter % 100 == 1)
     {
-   _MESSAGE("HIGGS Blade Distance Check: %.2f (touch: %.2f, imminent: %.2f, rayHits: %d)",
-  collision.closestDistance, m_collisionThreshold, m_imminentThreshold, collision.raycastHitCount);
  }
    }
             
@@ -267,21 +234,11 @@ m_bladesInContact = collision.isColliding;
             // Log collision event (only on initial contact)
       if (!m_wasInContact)
                {
-     _MESSAGE("WeaponGeometry: === BLADES TOUCHING === (HIGGS grabbed: %s, Grinding: %s)", 
-    offHandHiggsGrabbed ? "YES" : "NO",
-    collision.isGrinding ? "YES" : "NO");
-           _MESSAGE("  Collision Point: (%.2f, %.2f, %.2f)",
-             collision.collisionPoint.x,
-       collision.collisionPoint.y,
-    collision.collisionPoint.z);
-_MESSAGE("  Distance: %.2f, Raycast Hits: %d", collision.closestDistance, collision.raycastHitCount);
      }
   
        // Log when grinding starts
                 if (collision.isGrinding && !m_wasGrinding)
                {
-           _MESSAGE("WeaponGeometry: *** GRINDING STARTED *** (duration: %.2fs, velocity: %.1f)",
-         collision.grindDuration, collision.relativeVelocity);
     }
 
          // Check for X-POSE every frame while blades are touching
@@ -301,8 +258,6 @@ _MESSAGE("  Distance: %.2f, Raycast Hits: %d", collision.closestDistance, collis
 static bool loggedGracePeriod = false;
       if (!loggedGracePeriod)
    {
-   _MESSAGE("WeaponGeometryTracker: In grace period (%d/%d frames) - collision detection disabled",
-    m_framesSinceEquipChange, equipGraceFrames);
    loggedGracePeriod = true;
        }
           }
@@ -312,7 +267,6 @@ else if (wasJustGrinding)
        static bool loggedGrindTransition = false;
         if (!loggedGrindTransition)
            {
-       _MESSAGE("WeaponGeometry: Just stopped grinding - allowing smooth transition, not triggering unequip");
     loggedGrindTransition = true;
      }
       }
@@ -329,7 +283,6 @@ else if (wasJustGrinding)
       static bool loggedTriggerSkip = false;
           if (!loggedTriggerSkip)
        {
-          _MESSAGE("WeaponGeometry: Collision imminent but TRIGGER HELD - skipping unequip");
    loggedTriggerSkip = true;
       }
       }
@@ -338,15 +291,8 @@ else if (wasJustGrinding)
            static bool loggedTriggerSkip = false;
      loggedTriggerSkip = false;
    
-          _MESSAGE("WeaponGeometry: COLLISION IMMINENT!%s", withinBackupOnly ? " (BACKUP THRESHOLD)" : "");
-      _MESSAGE("  Distance: %.2f, Time to collision: %.3f sec, Raycast Hits: %d",
-         collision.closestDistance,
-           collision.timeToCollision,
-       collision.raycastHitCount);
      
     bool offHandIsLeft = GetCollisionAvoidanceHandIsLeft();
-       _MESSAGE("WeaponGeometry: Triggering game %s hand unequip + HIGGS grab!", 
-       offHandIsLeft ? "LEFT" : "RIGHT");
       EquipManager::GetSingleton()->ForceUnequipAndGrab(offHandIsLeft);
    }
                 }
@@ -361,26 +307,18 @@ static bool loggedCooldownSkip = false;
        // Blades no longer colliding or imminent
          if (m_wasInContact)
      {
-        _MESSAGE("WeaponGeometry: === BLADES NO LONGER TOUCHING === (HIGGS grabbed: %s)",
-     offHandHiggsGrabbed ? "YES" : "NO");
-        _MESSAGE("  Current distance: %.2f (threshold: %.2f)", 
-collision.closestDistance, m_collisionThreshold);
         
           if (m_wasGrinding)
      {
-     _MESSAGE("WeaponGeometry: *** GRINDING ENDED *** (total duration: %.2fs)",
-         m_grindDuration);
   }
      
      if (m_inXPose)
       {
-          _MESSAGE("WeaponGeometry: *** X-POSE ENDED *** (blades separated)");
              m_inXPose = false;
        }
 
      if (IsBlocking())
     {
-         _MESSAGE("WeaponGeometry: Stopping block (blades separated)");
         StopBlocking();
     }
     }
@@ -402,7 +340,6 @@ collision.closestDistance, m_collisionThreshold);
    static bool loggedNoRef = false;
       if (!loggedNoRef)
           {
-        _MESSAGE("UpdateHiggsGrabbedGeometry: No grabbed ref!");
             loggedNoRef = true;
         }
         geometry.isValid = false;
@@ -416,7 +353,6 @@ collision.closestDistance, m_collisionThreshold);
     static bool loggedNoNode = false;
        if (!loggedNoNode)
  {
-        _MESSAGE("UpdateHiggsGrabbedGeometry: No NiNode for grabbed object!");
            loggedNoNode = true;
           }
     geometry.isValid = false;
@@ -432,7 +368,6 @@ collision.closestDistance, m_collisionThreshold);
      static bool loggedNoWeapon = false;
             if (!loggedNoWeapon)
             {
-                _MESSAGE("UpdateHiggsGrabbedGeometry: Base form is not a weapon!");
         loggedNoWeapon = true;
   }
             geometry.isValid = false;
@@ -499,10 +434,6 @@ bladeVector.y * bladeVector.y +
 logCounter++;
         if (logCounter % 400 == 1)  // Log every 500 frames
         {
-            _MESSAGE("HIGGS Grabbed Geometry Update - Base(%.1f, %.1f, %.1f) Tip(%.1f, %.1f, %.1f) Length: %.1f",
-       geometry.basePosition.x, geometry.basePosition.y, geometry.basePosition.z,
-     geometry.tipPosition.x, geometry.tipPosition.y, geometry.tipPosition.z,
-     geometry.bladeLength);
         }
     }
 
@@ -518,19 +449,7 @@ logCounter++;
         NiAVObject* weaponNode = GetWeaponNode(isLeftHand);
         if (!weaponNode)
         {
-    static bool loggedLeftFail = false;
-      static bool loggedRightFail = false;
-if (isLeftHand && !loggedLeftFail)
-            {
-    _MESSAGE("WeaponGeometryTracker: Failed to get LEFT weapon node!");
-         loggedLeftFail = true;
-         }
-          else if (!isLeftHand && !loggedRightFail)
-      {
-            _MESSAGE("WeaponGeometryTracker: Failed to get RIGHT weapon node!");
-              loggedRightFail = true;
- }
-  geometry.isValid = false;
+            geometry.isValid = false;
             return;
         }
         
@@ -545,16 +464,10 @@ if (isLeftHand && !loggedLeftFail)
             static bool loggedRightNoWeap = false;
    if (isLeftHand && !loggedLeftNoWeap)
      {
- _MESSAGE("WeaponGeometryTracker: LEFT hand - no weapon form (FormID: %08X, Type: %d)", 
-        equippedForm ? equippedForm->formID : 0,
-        equippedForm ? equippedForm->formType : -1);
   loggedLeftNoWeap = true;
           }
       else if (!isLeftHand && !loggedRightNoWeap)
      {
-                _MESSAGE("WeaponGeometryTracker: RIGHT hand - no weapon form (FormID: %08X, Type: %d)", 
-    equippedForm ? equippedForm->formID : 0,
-         equippedForm ? equippedForm->formType : -1);
      loggedRightNoWeap = true;
      }
             geometry.isValid = false;
@@ -566,12 +479,10 @@ if (isLeftHand && !loggedLeftFail)
         static bool loggedRightSuccess = false;
         if (isLeftHand && !loggedLeftSuccess)
         {
-_MESSAGE("WeaponGeometryTracker: LEFT hand - Got weapon node and form! Reach: %.2f", weapon->gameData.reach);
  loggedLeftSuccess = true;
         }
       else if (!isLeftHand && !loggedRightSuccess)
     {
-            _MESSAGE("WeaponGeometryTracker: RIGHT hand - Got weapon node and form! Reach: %.2f", weapon->gameData.reach);
   loggedRightSuccess = true;
   }
         
@@ -613,7 +524,6 @@ _MESSAGE("WeaponGeometryTracker: LEFT hand - Got weapon node and form! Reach: %.
         static bool loggedNoPlayer = false;
       if (!loggedNoPlayer)
             {
-      _MESSAGE("WeaponGeometryTracker::GetWeaponNode - No player or loadedState!");
          loggedNoPlayer = true;
  }
         return nullptr;
@@ -630,7 +540,6 @@ _MESSAGE("WeaponGeometryTracker: LEFT hand - Got weapon node and form! Reach: %.
             static bool loggedNoRoot = false;
       if (!loggedNoRoot)
         {
- _MESSAGE("WeaponGeometryTracker::GetWeaponNode - No root node found!");
                 loggedNoRoot = true;
             }
         return nullptr;
@@ -640,8 +549,6 @@ _MESSAGE("WeaponGeometryTracker: LEFT hand - Got weapon node and form! Reach: %.
         static bool loggedNodes = false;
   if (!loggedNodes)
         {
-            _MESSAGE("WeaponGeometryTracker: Root node found: %s", rootNode->m_name ? rootNode->m_name : "unnamed");
-     _MESSAGE("WeaponGeometryTracker: Searching for weapon offset nodes...");
   loggedNodes = true;
       }
 
@@ -656,12 +563,10 @@ _MESSAGE("WeaponGeometryTracker: LEFT hand - Got weapon node and form! Reach: %.
          static bool loggedRightNotFound = false;
    if (isLeftHand && !loggedLeftNotFound)
             {
-     _MESSAGE("WeaponGeometryTracker: Node '%s' NOT FOUND in skeleton!", nodeName);
     loggedLeftNotFound = true;
  }
             else if (!isLeftHand && !loggedRightNotFound)
       {
-       _MESSAGE("WeaponGeometryTracker: Node '%s' NOT FOUND in skeleton!", nodeName);
    loggedRightNotFound = true;
             }
         }
@@ -981,19 +886,13 @@ NiPoint3 leftVel, rightVel;
         logCounter++;
         if (logCounter % 300 == 1)
         {
-_MESSAGE("WeaponGeometry: Raycast hits: L=%d, R=%d, Total=%d, SegDist=%.2f",
-   leftHitCount, rightHitCount, totalHitCount, segmentDistance);
             if (m_bladesGrinding)
             {
-     _MESSAGE("WeaponGeometry: GRINDING detected (duration: %.2fs, velocity: %.1f)",
-        m_grindDuration, outResult.relativeVelocity);
             }
         }
         
         if (outResult.isImminent)
         {
-  _MESSAGE("WeaponGeometry: IMMINENT - dist=%.2f, rayHits=%d, closing=%.1f, grinding=%s",
-      segmentDistance, totalHitCount, closingVelocity, m_bladesGrinding ? "YES" : "NO");
       }
   
         return outResult.isColliding || outResult.isImminent;
@@ -1386,7 +1285,6 @@ r.z = p1.z - p2.z;
             m_inXPose = false;
           if (m_wasInXPose)
             {
-  _MESSAGE("WeaponGeometry: *** X-POSE ENDED *** (blade geometry invalid)");
  }
   return;
   }
@@ -1409,7 +1307,6 @@ r.z = p1.z - p2.z;
             m_inXPose = false;
        if (m_wasInXPose)
  {
-     _MESSAGE("WeaponGeometry: *** X-POSE ENDED *** (blade length too short)");
             }
             return;
         }
@@ -1428,7 +1325,6 @@ r.z = p1.z - p2.z;
             m_inXPose = false;
         if (m_wasInXPose)
        {
-   _MESSAGE("WeaponGeometry: *** X-POSE ENDED *** (no player)");
        }
       return;
         }
@@ -1455,12 +1351,10 @@ r.z = p1.z - p2.z;
 
       if (m_inXPose && !m_wasInXPose)
         {
-      _MESSAGE("WeaponGeometry: *** X-POSE DETECTED! *** Blades crossed facing forward!");
             StartBlocking();
  }
     else if (!m_inXPose && m_wasInXPose)
         {
-   _MESSAGE("WeaponGeometry: *** X-POSE ENDED ***");
             StopBlocking();
         }
     }
