@@ -315,6 +315,29 @@ namespace FalseEdgeVR
         }
     };
 
+    class DelayedLogOffHand2HSkillEquipTask : public TaskDelegate
+    {
+    public:
+        UInt32 m_weaponFormID;
+
+        DelayedLogOffHand2HSkillEquipTask(UInt32 weaponFormID) : m_weaponFormID(weaponFormID) {}
+
+        virtual void Run() override
+        {
+            if (m_weaponFormID == 0)
+                return;
+
+            TESForm* weapon = LookupFormByID(m_weaponFormID);
+            if (weapon)
+                EquipManager::GetSingleton()->LogOffHandTwoHandedSkillWeaponEquip(weapon);
+        }
+
+        virtual void Dispose() override
+        {
+            delete this;
+        }
+    };
+
     // Runs on the game thread after the 0.1s delay to check whether the
     // left game hand weapon (captured at combo time) is still equipped.
     class DelayedComboLeftUnequipCheckTask : public TaskDelegate
@@ -445,6 +468,13 @@ namespace FalseEdgeVR
         if (actor == *g_thePlayer && isEquipping && EquipManager::IsTwoHandedWeapon(item))
         {
             EquipManager::GetSingleton()->ScheduleDelayedLogPlayer2HWeaponEquip(evn->baseObject);
+        }
+
+        // Log when ANY weapon using the Two-Handed skill record is equipped to the
+        // off (left) hand — catches 1H-animation weapons that use the 2H skill.
+        if (actor == *g_thePlayer && isEquipping && EquipManager::UsesTwoHandedSkill(item) && g_task)
+        {
+            g_task->AddTask(new DelayedLogOffHand2HSkillEquipTask(evn->baseObject));
         }
 
         // Check if this is a one-handed weapon we track
@@ -776,7 +806,7 @@ case WeaponType::Axe:
      // TRIGGER-BASED WEAPON HOLD: Auto-unequip weapon on equip
    // ANY 1H weapon will be HIGGS grabbed unless trigger is held
         // This applies to: single weapon, dual-wield, and shield+weapon
-    // EXCLUDED: 2H weapons, bows, staffs, bound weapons (handled by IsWeapon check above)
+    // EXCLUDED: bows and bound weapons when not tracked (handled by IsWeapon check above)
    // ============================================
         if (type != WeaponType::Shield && type != WeaponType::None)
         {
@@ -996,20 +1026,22 @@ case WeaponType::Mace:
   case TESObjectWEAP::GameData::kType_1HM:
              return WeaponType::Mace;
             
- case TESObjectWEAP::GameData::kType_OneHandAxe:
+            case TESObjectWEAP::GameData::kType_OneHandAxe:
             case TESObjectWEAP::GameData::kType_1HA:
       return WeaponType::Axe;
 
-            // Two-handed melee weapons - always excluded
+            case TESObjectWEAP::GameData::kType_Staff:
+            case TESObjectWEAP::GameData::kType_Staff2:
+                return staffTrackingEnabled ? WeaponType::Staff : WeaponType::None;
+
             case TESObjectWEAP::GameData::kType_TwoHandSword:
             case TESObjectWEAP::GameData::kType_2HS:
             case TESObjectWEAP::GameData::kType_TwoHandAxe:
             case TESObjectWEAP::GameData::kType_2HA:
-                return WeaponType::None;
+                return twoHandedTrackingEnabled ? WeaponType::TwoHanded : WeaponType::None;
 
-            // Bows, staffs, crossbows - always excluded
+            // Bows, crossbows - always excluded
             case TESObjectWEAP::GameData::kType_Bow:
-            case TESObjectWEAP::GameData::kType_Staff:
             case TESObjectWEAP::GameData::kType_CrossBow:
        return WeaponType::None;
             
@@ -1028,6 +1060,8 @@ case WeaponType::Mace:
             case WeaponType::Mace:       return "Mace";
         case WeaponType::Axe:     return "Axe";
        case WeaponType::Shield:     return "Shield";
+       case WeaponType::Staff:      return "Staff";
+       case WeaponType::TwoHanded:  return "TwoHanded";
      case WeaponType::None:
        default: return "None";
         }
@@ -1045,8 +1079,8 @@ case WeaponType::Mace:
         if (form->formType != kFormType_Weapon)
        return false;
         
-        // Check if it's a weapon type we actually track (one-handed only)
-    // Exclude bows, staffs, crossbows, two-handed weapons, and bound weapons
+        // Check if it's a weapon type we actually track (1H, optional staff/2H melee)
+    // Exclude bows, crossbows, and bound weapons
   TESObjectWEAP* weapon = DYNAMIC_CAST(form, TESForm, TESObjectWEAP);
         if (!weapon)
    return false;
@@ -1076,14 +1110,18 @@ case TESObjectWEAP::GameData::kType_1HD:
          case TESObjectWEAP::GameData::kType_1HA:
       return true;
 
+            case TESObjectWEAP::GameData::kType_Staff:
+            case TESObjectWEAP::GameData::kType_Staff2:
+                return staffTrackingEnabled;
+
             case TESObjectWEAP::GameData::kType_TwoHandSword:
             case TESObjectWEAP::GameData::kType_2HS:
             case TESObjectWEAP::GameData::kType_TwoHandAxe:
             case TESObjectWEAP::GameData::kType_2HA:
-                return false;
+                return twoHandedTrackingEnabled;
             
             default:
- return false;  // Bows, staffs, crossbows - don't track
+ return false;  // Bows, crossbows - don't track
    }
     }
 
@@ -1118,12 +1156,15 @@ TESObjectARMO* armor = DYNAMIC_CAST(form, TESForm, TESObjectARMO);
    {
       case TESObjectWEAP::GameData::kType_TwoHandSword:
           case TESObjectWEAP::GameData::kType_2HS:
-     case TESObjectWEAP::GameData::kType_TwoHandAxe:
+      case TESObjectWEAP::GameData::kType_TwoHandAxe:
         case TESObjectWEAP::GameData::kType_2HA:
+                return !twoHandedTrackingEnabled;
       case TESObjectWEAP::GameData::kType_Bow:
-     case TESObjectWEAP::GameData::kType_Staff:
          case TESObjectWEAP::GameData::kType_CrossBow:
 return true;
+            case TESObjectWEAP::GameData::kType_Staff:
+            case TESObjectWEAP::GameData::kType_Staff2:
+                return !staffTrackingEnabled;
    default:
     return false;
     }
@@ -1350,6 +1391,43 @@ return true;
         }
     }
 
+    bool EquipManager::UsesTwoHandedSkill(TESForm* weapon)
+    {
+        if (!weapon || weapon->formType != kFormType_Weapon)
+            return false;
+
+        TESObjectWEAP* weap = DYNAMIC_CAST(weapon, TESForm, TESObjectWEAP);
+        if (!weap)
+            return false;
+
+        // ActorValue index for the Two-Handed skill.
+        const UInt32 kTwoHandedSkillAV = 7;
+        return weap->gameData.skill == kTwoHandedSkillAV;
+    }
+
+    void EquipManager::LogOffHandTwoHandedSkillWeaponEquip(TESForm* weapon)
+    {
+        if (!UsesTwoHandedSkill(weapon))
+            return;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return;
+
+        bool wornLeft = false;
+        bool wornRight = false;
+        if (!Get2HWeaponWornGameHands(player, weapon, wornLeft, wornRight))
+            return;
+
+        // Off hand = left game hand.
+        if (!wornLeft)
+            return;
+
+        const char* weaponName = weapon->GetName();
+        _MESSAGE("[FalseEdgeVR] Off-hand (LEFT) weapon with Two-Handed skill record equipped: %s (0x%08X)",
+            weaponName ? weaponName : "(unnamed)", weapon->formID);
+    }
+
   // ============================================
     // Forced Unequip Functions
     // ============================================
@@ -1432,6 +1510,69 @@ return true;
         s_suppressSheathSound = false;
 
 }
+
+    // Directly unequip whatever weapon the player actually has in a hand slot.
+    // Robust for load: ignores tracked state, handles 2H/both-hands weapons (which
+    // report only on the right worn list), and does NOT spawn/grab — just unequips.
+    bool EquipManager::FullUnequipHand(bool isLeftGameHand)
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        TESForm* item = player->GetEquippedObject(isLeftGameHand);
+        if (!item || item->formType != kFormType_Weapon)
+            return false;
+
+        ::EquipManager* gameEquip = ::EquipManager::GetSingleton();
+        if (!gameEquip)
+            return false;
+
+        ExtraContainerChanges* containerChanges = static_cast<ExtraContainerChanges*>(
+            player->extraData.GetByType(kExtraData_ContainerChanges));
+        if (!containerChanges || !containerChanges->data)
+            return false;
+
+        InventoryEntryData* entryData = containerChanges->data->FindItemEntry(item);
+        if (!entryData)
+            return false;
+
+        BaseExtraList* rightEquipList = NULL;
+        BaseExtraList* leftEquipList = NULL;
+        entryData->GetExtraWornBaseLists(&rightEquipList, &leftEquipList);
+
+        BaseExtraList* equipList = isLeftGameHand ? leftEquipList : rightEquipList;
+        BGSEquipSlot* equipSlot = isLeftGameHand ? GetLeftHandSlot() : GetRightHandSlot();
+
+        // 2H / both-hands weapons are worn only on the right slot, so fall back to
+        // whichever worn list actually exists.
+        if (!equipList)
+        {
+            if (rightEquipList)
+            {
+                equipList = rightEquipList;
+                equipSlot = GetRightHandSlot();
+            }
+            else if (leftEquipList)
+            {
+                equipList = leftEquipList;
+                equipSlot = GetLeftHandSlot();
+            }
+        }
+
+        if (!equipList)
+            return false;
+
+        BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
+        if (xCannotWear)
+            equipList->Remove(kExtraData_CannotWear, xCannotWear);
+
+        s_suppressSheathSound = true;
+        CALL_MEMBER_FN(gameEquip, UnequipItem)(player, item, equipList, 1, equipSlot, false, true, true, false, NULL);
+        s_suppressSheathSound = false;
+
+        return true;
+    }
 
     void EquipManager::ForceUnequipLeftHand()
     {
@@ -2020,6 +2161,24 @@ return true;
         return recovered;
     }
 
+    void EquipManager::HolsterAllEquippedWeaponHands()
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return;
+
+        for (int handIdx = 0; handIdx < 2; handIdx++)
+        {
+            const bool isLeftGameHand = (handIdx == 0);
+            if (GetDroppedWeaponRef(isLeftGameHand))
+                continue;
+
+            TESForm* equipped = player->GetEquippedObject(isLeftGameHand);
+            if (equipped && IsWeapon(equipped))
+                ForceUnequipAndGrab(isLeftGameHand);
+        }
+    }
+
     bool EquipManager::ForceUnequipAndGrab(bool isLeftGameHand)
     {
     if (IsWeaponGrabToHolsterBlocked())
@@ -2244,43 +2403,15 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
    bool isLeftVRController = GameHandToVRController(isLeftGameHand);
    VRInputHandler::ClearWeaponLock(isLeftVRController);
 
-   // Step 2: Determine spawn position based on mount state
-
-        // Step 2: Determine spawn position based on mount state
-      // - If player is MOUNTED: spawn at hand position (to avoid horse collision)
-   // - If player is NOT mounted: spawn BEHIND player (so they can't see the weapon appear)
-      NiNode* rootNode = player->GetNiRootNode(0);
+   // Step 2: Spawn position (same offsets whether on foot or mounted)
+        NiNode* rootNode = player->GetNiRootNode(0);
         if (!rootNode)
-        {
             rootNode = player->GetNiRootNode(1);
-        }
-        
+
         NiPoint3 spawnPos = player->pos;
-        
-        // Check if player is mounted
-      NiPointer<Actor> mountActor;
-      bool isMounted = CALL_MEMBER_FN(player, GetMount)(mountActor) && mountActor;
-        
-      if (isMounted)
-      {
-          // MOUNTED: Spawn at player position with configurable mounted offsets
-
-          // Simple offset from player world position (mounted settings)
-          spawnPos.x = player->pos.x + spawnOffsetMountedX;
-          spawnPos.y = player->pos.y + spawnOffsetMountedY;
-          spawnPos.z = player->pos.z + spawnOffsetMountedZ;
-
-      }
-    else
-  {
-          // NOT MOUNTED: Spawn at player position with configurable offsets
-
-          // Simple offset from player world position
-          spawnPos.x = player->pos.x + spawnOffsetX;
-          spawnPos.y = player->pos.y + spawnOffsetY;
-          spawnPos.z = player->pos.z + spawnOffsetZ;
-
-        }
+        spawnPos.x = player->pos.x + spawnOffsetX;
+        spawnPos.y = player->pos.y + spawnOffsetY;
+        spawnPos.z = player->pos.z + spawnOffsetZ;
 
       // Step 3: Create a world object using PlaceAtMe
       TESObjectREFR* droppedWeapon = PlaceAtMe_Native(nullptr, 0, player, item, 1, false, false);
@@ -2767,6 +2898,62 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
             bool m_isFinalPass;
         };
 
+        class UnequipEquippedWeaponsOnLoadTask : public TaskDelegate
+        {
+        public:
+            UnequipEquippedWeaponsOnLoadTask(int framesLeft) : m_framesLeft(framesLeft) {}
+
+            virtual void Run() override
+            {
+                if (m_framesLeft > 0 && g_task)
+                {
+                    g_task->AddTask(new UnequipEquippedWeaponsOnLoadTask(m_framesLeft - 1));
+                    return;
+                }
+
+                PlayerCharacter* player = *g_thePlayer;
+                if (!player)
+                {
+                    _MESSAGE("[FalseEdgeVR] UnequipOnLoad: no player — aborting");
+                    return;
+                }
+
+                _MESSAGE("[FalseEdgeVR] UnequipOnLoad: running");
+
+                EquipManager* mgr = EquipManager::GetSingleton();
+                // Process RIGHT first: a 2H/both-hands weapon is worn on the right slot,
+                // and unequipping it clears the left query on the next iteration.
+                for (int handIdx = 0; handIdx < 2; handIdx++)
+                {
+                    const bool isLeftGameHand = (handIdx == 1);
+                    const char* handName = isLeftGameHand ? "LEFT" : "RIGHT";
+
+                    TESForm* equipped = player->GetEquippedObject(isLeftGameHand);
+                    const UInt32 equippedID = equipped ? equipped->formID : 0u;
+                    const bool isWeapon = equipped && equipped->formType == kFormType_Weapon;
+                    const bool isTwoHand = equipped && EquipManager::IsTwoHandedWeapon(equipped);
+
+                    _MESSAGE("[FalseEdgeVR] UnequipOnLoad: %s hand equipped=0x%08X isWeapon=%d isTwoHand=%d",
+                        handName, equippedID, isWeapon ? 1 : 0, isTwoHand ? 1 : 0);
+
+                    if (!isWeapon)
+                        continue;
+
+                    bool result = mgr->FullUnequipHand(isLeftGameHand);
+                    _MESSAGE("[FalseEdgeVR] UnequipOnLoad: %s hand FullUnequipHand -> %d",
+                        handName, result ? 1 : 0);
+                }
+            }
+
+            virtual void Dispose() override
+            {
+                delete this;
+            }
+
+        private:
+            int m_framesLeft;
+        };
+
         void SaveDroppedWeaponsCallback(SKSESerializationInterface* intfc)
         {
             if (!intfc)
@@ -2920,6 +3107,15 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
             bool isFinalPass = (i + 1) == (sizeof(kRecoveryDelays) / sizeof(kRecoveryDelays[0]));
             g_task->AddTask(new RecoverGrabbedWeaponsOnLoadTask(kRecoveryDelays[i], isFinalPass));
         }
+    }
+
+    void EquipManager::UnequipEquippedWeaponsOnLoad()
+    {
+        if (!g_task)
+            return;
+
+        // Delay so the player and cell are ready before unequipping.
+        g_task->AddTask(new UnequipEquippedWeaponsOnLoadTask(120));
     }
 
     void EquipManager::RegisterSerialization(SKSESerializationInterface* intfc)

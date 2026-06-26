@@ -53,6 +53,7 @@ namespace FalseEdgeVR {
 	// Weapon lock settings (trigger spam detection)
 	extern int triggerSpamThreshold;            // Number of trigger presses to toggle weapon lock
 	extern float triggerSpamWindow;           // Time window (seconds) for trigger presses
+	extern float vanillaDefaultRecoverySeconds; // After both hands fall back to vanilla equip, holster to grab
 
 	// Weapon spawn offset settings (when unequipping for HIGGS grab)
 	// Non-mounted: spawn behind player so they can't see it
@@ -69,6 +70,23 @@ namespace FalseEdgeVR {
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	extern int collisionAvoidanceHand;          // Which hand gets unequipped/grabbed during dual-wield collision
 
+	// Mount: equip grabbed weapons while riding; holster to grab on dismount
+	extern bool mountWeaponHandlingEnabled;
+
+	// Staff: include in trigger-hold / holster-to-grab when enabled
+	extern bool staffTrackingEnabled;
+	extern float staffTriggerReleaseUnequipDelay; // Delay after trigger release before holstering staff
+
+	// Two-handed melee: auto-enabled when 2hWeaponsUnlocked is loaded
+	extern bool twoHandedTrackingEnabled;
+
+	// Door stow: when grabbing a 2H weapon in each hand while facing a nearby door,
+	// stow both to inventory until the player turns away, then re-equip them.
+	extern bool doorStowDual2HEnabled;       // Enable/disable the feature
+	extern float doorStowDual2HProximity;    // How close (units) the player must be to the door
+
+	// Set twoHandedTrackingEnabled from load order (call after PostLoad)
+	void InitTwoHandedTrackingFromLoadOrder();
 	// Shield bash settings
 	extern bool shieldBashEnabled;
 	extern int shieldBashThreshold;

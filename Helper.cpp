@@ -114,6 +114,7 @@ namespace FalseEdgeVR
 		if ((*g_thePlayer) && (*g_thePlayer)->loadedState)
 		{
 			EquipManager::GetSingleton()->RecoverGrabbedWeaponsOnLoad();
+			EquipManager::GetSingleton()->UnequipEquippedWeaponsOnLoad();
 		}
 	}
 

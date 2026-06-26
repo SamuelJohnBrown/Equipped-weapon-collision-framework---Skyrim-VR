@@ -619,6 +619,16 @@ namespace FalseEdgeVR
 		}
 	}
 
+	bool IsPlayerMounted(Actor* actor)
+	{
+		PlayerCharacter* player = actor ? DYNAMIC_CAST(actor, Actor, PlayerCharacter) : *g_thePlayer;
+		if (!player)
+			return false;
+
+		NiPointer<Actor> mountActor;
+		return CALL_MEMBER_FN(player, GetMount)(mountActor) && mountActor;
+	}
+
 	bool GetCollisionAvoidanceHandIsLeft()
 	{
 		// Returns which game hand should be unequipped during dual-wield collision

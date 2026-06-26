@@ -20,6 +20,7 @@ namespace FalseEdgeVR
 {
 	static SKSEMessagingInterface* g_messaging = NULL;
 	PluginHandle					g_pluginHandle = kPluginHandle_Invalid;
+	const PluginInfo* (* g_getPluginInfo)(const char* name) = nullptr;
 	static SKSEPapyrusInterface* g_papyrus = NULL;
 	static SKSEObjectInterface* g_object = NULL;
 	SKSETaskInterface* g_task = NULL;
@@ -457,6 +458,8 @@ namespace FalseEdgeVR
 				}
 				else if (msg->type == SKSEMessagingInterface::kMessage_PostPostLoad)
 				{
+					FalseEdgeVR::InitTwoHandedTrackingFromLoadOrder();
+
 					// Get HIGGS interface
 					higgsInterface = HiggsPluginAPI::GetHiggsInterface001(g_pluginHandle, g_messaging);
 					if (!higgsInterface)
@@ -493,6 +496,8 @@ namespace FalseEdgeVR
 		}
 
 		bool SKSEPlugin_Load(const SKSEInterface* skse) {	// Called by SKSE to load this plugin
+
+			g_getPluginInfo = skse->GetPluginInfo;
 
 			g_task = (SKSETaskInterface*)skse->QueryInterface(kInterface_Task);
 

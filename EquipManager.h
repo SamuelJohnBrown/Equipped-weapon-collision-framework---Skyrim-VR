@@ -18,8 +18,10 @@ namespace FalseEdgeVR
         Dagger,
         Mace,
         Axe,
-        Shield
-        // Note: Two-handed weapons, bows, staffs are NOT tracked - they return None
+        Shield,
+        Staff,
+        TwoHanded
+        // Note: Bows and crossbows are NOT tracked - they return None
     };
 
     // Represents an equipped item in a hand slot
@@ -128,7 +130,7 @@ namespace FalseEdgeVR
         // Check if form is a shield
         static bool IsShield(TESForm* form);
         
-   // Check if form is a two-handed weapon, bow, staff, or crossbow
+   // Check if form is a bow, crossbow, or untracked two-handed melee (when 2H tracking disabled)
         static bool IsTwoHandedWeapon(TESForm* form);
    
         // Check if the player currently has a 2H weapon equipped
@@ -147,6 +149,9 @@ namespace FalseEdgeVR
         // Unequip weapon and drop it for HIGGS to grab. Returns true if unequip+spawn succeeded.
         bool ForceUnequipAndGrab(bool isLeftHand);
 
+        // Holster equipped weapons to HIGGS grab on both hands (e.g. after dismount).
+        void HolsterAllEquippedWeaponHands();
+
         // Resolve the grabbed world weapon for a game hand (tracked ref, refID lookup, or HIGGS).
         TESObjectREFR* ResolveGrabbedWeaponRefForHand(bool isLeftGameHand) const;
 
@@ -163,6 +168,12 @@ namespace FalseEdgeVR
 
         void ScheduleDelayedLogPlayer2HWeaponEquip(UInt32 weaponFormID);
         void LogPlayer2HWeaponEquip(TESForm* weapon);
+
+        // True if the weapon uses the Two-Handed skill record (gameData.skill), regardless
+        // of its animation type (catches 1H-type weapons that use the 2H skill).
+        static bool UsesTwoHandedSkill(TESForm* weapon);
+        // Logs when a weapon using the Two-Handed skill record is equipped to the off hand.
+        void LogOffHandTwoHandedSkillWeaponEquip(TESForm* weapon);
         void TryLog2HLeftHandWithRightGameHandTrigger(TESForm* weapon = nullptr);
         void CheckLeftHandUnequipAfterCombo(UInt32 leftWeaponFormID);
 
@@ -249,6 +260,12 @@ namespace FalseEdgeVR
 
         // Return mod-grabbed world weapons to inventory after save/load (or delete duplicates).
         void RecoverGrabbedWeaponsOnLoad();
+
+        // On load, fully unequip anything in either hand slot (no spawn/grab).
+        void UnequipEquippedWeaponsOnLoad();
+
+        // Directly unequip the weapon currently in a hand slot (robust, no spawn/grab).
+        bool FullUnequipHand(bool isLeftGameHand);
 
         // Merge live dropped-weapon tracking into load-recovery state before it is cleared.
         void CaptureDroppedWeaponsForLoadRecovery();

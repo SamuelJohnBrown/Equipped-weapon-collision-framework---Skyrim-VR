@@ -1,7 +1,47 @@
 #include "config.h"
+#include "Engine.h"
 #include "skse64/GameData.h"
+#include <Windows.h>
 
 namespace FalseEdgeVR {
+
+	static bool IsSksePluginDllLoaded(const char* dllFileName)
+	{
+		HMODULE module = GetModuleHandleA(dllFileName);
+		return module && GetProcAddress(module, "SKSEPlugin_Query");
+	}
+
+	static bool IsTwoHandWeaponsUnlockedPluginPresent()
+	{
+		static const char* kDllNames[] = {
+			"2hWeaponsUnlocked.dll",
+			"2HWeaponsUnlocked.dll",
+		};
+
+		for (const char* dllName : kDllNames)
+		{
+			if (IsSksePluginDllLoaded(dllName))
+				return true;
+		}
+
+		if (g_getPluginInfo)
+		{
+			static const char* kPluginNames[] = {
+				"2hWeaponsUnlocked",
+				"2HWeaponsUnlocked",
+				"TwoHandWeaponsUnlocked",
+				"2H Weapons Unlocked",
+			};
+
+			for (const char* pluginName : kPluginNames)
+			{
+				if (g_getPluginInfo(pluginName))
+					return true;
+			}
+		}
+
+		return false;
+	}
 
 	static UInt32 ParseHexFormID(const std::string& value)
 	{
@@ -96,6 +136,7 @@ namespace FalseEdgeVR {
 	// Weapon lock settings (trigger spam detection)
 	int triggerSpamThreshold = 4;      // Number of trigger presses to toggle weapon lock
 	float triggerSpamWindow = 2.0f;     // Time window (seconds) for trigger presses
+	float vanillaDefaultRecoverySeconds = 15.0f; // Holster equipped weapons after vanilla-default stall
 
 	// Weapon spawn offset settings (when unequipping for HIGGS grab)
 	// Non-mounted: spawn behind player so they can't see it
@@ -112,6 +153,29 @@ namespace FalseEdgeVR {
 	// Collision avoidance hand preference (0 = left hand unequips, 1 = right hand unequips)
 	int collisionAvoidanceHand = 0;             // Default: left hand gets unequipped/grabbed during dual-wield collision
 
+	// Mount: equip grabbed weapons while riding; holster to grab on dismount
+	bool mountWeaponHandlingEnabled = true;
+
+	// Staff: include in trigger-hold / holster-to-grab when enabled
+	bool staffTrackingEnabled = true;
+	float staffTriggerReleaseUnequipDelay = 1.0f;
+
+	// Two-handed melee: auto-enabled when 2hWeaponsUnlocked is loaded
+	bool twoHandedTrackingEnabled = false;
+
+	// Door stow (dual 2H grabbed while facing a door)
+	bool doorStowDual2HEnabled = true;
+	float doorStowDual2HProximity = 256.0f; // ~2.5m
+
+	void InitTwoHandedTrackingFromLoadOrder()
+	{
+		twoHandedTrackingEnabled = IsTwoHandWeaponsUnlockedPluginPresent();
+
+		if (twoHandedTrackingEnabled)
+			_MESSAGE("[FalseEdgeVR] 2H weapon tracking enabled (2hWeaponsUnlocked detected)");
+		else
+			_MESSAGE("[FalseEdgeVR] 2H weapon tracking disabled (2hWeaponsUnlocked not loaded)");
+	}
 	// Shield bash settings - defaults
 	bool shieldBashEnabled = true;   // Enable/disable shield bash tracking feature
 	int shieldBashThreshold = 3;   // Number of bashes required to trigger effect
@@ -263,6 +327,10 @@ namespace FalseEdgeVR {
 						{
 							triggerSpamWindow = std::stof(variableValueStr);
 						}
+						else if (variableName == "VanillaDefaultRecoverySeconds")
+						{
+							vanillaDefaultRecoverySeconds = std::stof(variableValueStr);
+						}
 					}
 					else if (currentSection == "WeaponSpawn")
 					{
@@ -302,6 +370,44 @@ namespace FalseEdgeVR {
 						else if (variableName == "OffsetZ")
 						{
 							spawnOffsetMountedZ = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "Mount")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "Enabled")
+						{
+							mountWeaponHandlingEnabled = (std::stoi(variableValueStr) != 0);
+						}
+					}
+					else if (currentSection == "Staff")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "Enabled")
+						{
+							staffTrackingEnabled = (std::stoi(variableValueStr) != 0);
+						}
+						else if (variableName == "TriggerReleaseUnequipDelay")
+						{
+							staffTriggerReleaseUnequipDelay = std::stof(variableValueStr);
+						}
+					}
+					else if (currentSection == "DoorStow")
+					{
+						std::string variableName;
+						std::string variableValueStr = GetConfigSettingsStringValue(line, variableName);
+
+						if (variableName == "Enabled")
+						{
+							doorStowDual2HEnabled = (std::stoi(variableValueStr) != 0);
+						}
+						else if (variableName == "Proximity")
+						{
+							doorStowDual2HProximity = std::stof(variableValueStr);
 						}
 					}
 					else if (currentSection == "ShieldBash")

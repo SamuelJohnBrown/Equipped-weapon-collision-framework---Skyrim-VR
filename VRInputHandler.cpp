@@ -5,6 +5,7 @@
 #include "skse64/GameReferences.h"
 #include "skse64/GameMenus.h"
 #include <algorithm>
+#include <cmath>
 
 namespace FalseEdgeVR
 {
@@ -184,8 +185,440 @@ namespace FalseEdgeVR
         }
     }
 
-    static bool EquipGrabbedWeaponForGameHand(bool isLeftGameHand)
+    static bool IsTwoHandedMeleeBaseForm(TESForm* form)
     {
+        if (!form || form->formType != kFormType_Weapon)
+            return false;
+
+        TESObjectWEAP* weapon = DYNAMIC_CAST(form, TESForm, TESObjectWEAP);
+        if (!weapon)
+            return false;
+
+        switch (weapon->gameData.type)
+        {
+        case TESObjectWEAP::GameData::kType_TwoHandSword:
+        case TESObjectWEAP::GameData::kType_2HS:
+        case TESObjectWEAP::GameData::kType_TwoHandAxe:
+        case TESObjectWEAP::GameData::kType_2HA:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    static bool IsGrabEquipBlockedByOppositeHand2HTriggerHold(bool isLeftGameHand)
+    {
+        if (!twoHandedTrackingEnabled)
+            return false;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        const bool oppositeGameHand = !isLeftGameHand;
+        TESForm* oppositeEquipped = player->GetEquippedObject(oppositeGameHand);
+        if (!IsTwoHandedMeleeBaseForm(oppositeEquipped))
+            return false;
+
+        const bool oppositeVRControllerIsLeft = GameHandToVRController(oppositeGameHand);
+        const bool oppositeTriggerHeld = oppositeVRControllerIsLeft ?
+            s_leftTriggerPressed : s_rightTriggerPressed;
+
+        return oppositeTriggerHeld;
+    }
+
+    // While the off (left) hand has a weapon using the Two-Handed skill record equipped,
+    // the main (right) hand cannot grab-to-equip: holding trigger on the main-hand
+    // grabbed weapon will not equip it; it stays grabbed.
+    static bool IsMainHandGrabEquipBlockedByOffHand2HSkill(bool isLeftGameHand)
+    {
+        if (!twoHandedTrackingEnabled)
+            return false;
+
+        // Only the main (right) hand is blocked; the off hand is the left game hand.
+        if (isLeftGameHand)
+            return false;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        TESForm* offHandEquipped = player->GetEquippedObject(true);
+        return EquipManager::UsesTwoHandedSkill(offHandEquipped);
+    }
+
+    // While the main (right) hand has a 2H-skill weapon equip-LOCKED, the off (left) hand
+    // cannot trigger-equip ANY grabbed weapon (1H or 2H): holding trigger on the off-hand
+    // grabbed weapon will not equip it; it stays grabbed until the main-hand lock is released.
+    static bool IsOffHandGrabEquipBlockedByLockedMainHand2H(bool isLeftGameHand)
+    {
+        if (!twoHandedTrackingEnabled)
+            return false;
+
+        // Restriction applies to the off (left) game hand only.
+        if (!isLeftGameHand)
+            return false;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        // Main (right) hand must have a 2H-skill weapon equipped AND be equip-locked.
+        TESForm* mainEquipped = player->GetEquippedObject(false);
+        if (!EquipManager::UsesTwoHandedSkill(mainEquipped))
+            return false;
+
+        const bool mainVRControllerIsLeft = GameHandToVRController(false);
+        return VRInputHandler::IsWeaponLocked(mainVRControllerIsLeft);
+    }
+
+    // Runs on the main game thread: resolve the form by ID and log it. GetName() is not
+    // safe to call from the HIGGS physics/job thread, so the lock logging is deferred here.
+    class LogWeaponLock2HSkillTask : public TaskDelegate
+    {
+    public:
+        UInt32 m_formID;
+        bool m_isLeftVRController;
+        bool m_gameHandIsLeft;
+
+        LogWeaponLock2HSkillTask(UInt32 formID, bool isLeftVRController, bool gameHandIsLeft)
+            : m_formID(formID), m_isLeftVRController(isLeftVRController), m_gameHandIsLeft(gameHandIsLeft) {}
+
+        virtual void Run() override
+        {
+            TESForm* form = LookupFormByID(m_formID);
+            const char* weaponName = form ? form->GetName() : nullptr;
+            _MESSAGE("[FalseEdgeVR] Weapon lock engaged on %s controller (%s game hand) for Two-Handed-skill weapon: %s (0x%08X)",
+                m_isLeftVRController ? "LEFT" : "RIGHT",
+                m_gameHandIsLeft ? "LEFT" : "RIGHT",
+                weaponName ? weaponName : "(unnamed)",
+                m_formID);
+        }
+
+        virtual void Dispose() override { delete this; }
+    };
+
+    // Log (when the 4x-trigger weapon lock engages) if the weapon equipped on the hand
+    // mapped to this VR controller uses the Two-Handed skill record. The actual logging
+    // (which needs GetName) is deferred to the main thread; this runs on the physics thread.
+    static void LogWeaponLockIf2HSkill(bool isLeftVRController)
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return;
+
+        // Map the VR controller back to its game hand.
+        const bool gameHandIsLeft = (GameHandToVRController(true) == isLeftVRController);
+
+        TESForm* equipped = player->GetEquippedObject(gameHandIsLeft);
+        if (!EquipManager::UsesTwoHandedSkill(equipped))
+            return;
+
+        if (g_task)
+            g_task->AddTask(new LogWeaponLock2HSkillTask(equipped->formID, isLeftVRController, gameHandIsLeft));
+    }
+
+    // Only one Two-Handed-skill weapon may be locked at a time. Returns true if engaging
+    // a lock on this controller should be blocked because THIS hand holds a 2H-skill
+    // weapon while the OPPOSITE hand already has a locked 2H-skill weapon.
+    static bool IsTwoHandedSkillLockBlockedByOppositeHand(bool isLeftVRController)
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        const bool gameHandIsLeft = (GameHandToVRController(true) == isLeftVRController);
+
+        // Restriction only applies when the weapon being locked uses the 2H skill.
+        TESForm* thisEquipped = player->GetEquippedObject(gameHandIsLeft);
+        if (!EquipManager::UsesTwoHandedSkill(thisEquipped))
+            return false;
+
+        // The opposite hand must also hold a 2H-skill weapon...
+        TESForm* oppositeEquipped = player->GetEquippedObject(!gameHandIsLeft);
+        if (!EquipManager::UsesTwoHandedSkill(oppositeEquipped))
+            return false;
+
+        // ...and that opposite controller's lock must currently be engaged.
+        const bool oppositeLocked = isLeftVRController ? s_rightWeaponLocked : s_leftWeaponLocked;
+        return oppositeLocked;
+    }
+
+    static TESForm* ResolveTwoHandedMeleeFormFromPlayer()
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return nullptr;
+
+        TESForm* equippedRight = player->GetEquippedObject(false);
+        if (IsTwoHandedMeleeBaseForm(equippedRight))
+            return equippedRight;
+
+        TESForm* equippedLeft = player->GetEquippedObject(true);
+        if (IsTwoHandedMeleeBaseForm(equippedLeft))
+            return equippedLeft;
+
+        return nullptr;
+    }
+
+    static TESForm* ResolveDualHand2HWeaponForm(
+        TESObjectREFR*& outLeftGrabbed,
+        TESObjectREFR*& outRightGrabbed)
+    {
+        outLeftGrabbed = nullptr;
+        outRightGrabbed = nullptr;
+
+        if (!higgsInterface)
+            return nullptr;
+
+        outLeftGrabbed = higgsInterface->GetGrabbedObject(true);
+        outRightGrabbed = higgsInterface->GetGrabbedObject(false);
+
+        if (outLeftGrabbed && outLeftGrabbed->baseForm && IsTwoHandedMeleeBaseForm(outLeftGrabbed->baseForm))
+            return outLeftGrabbed->baseForm;
+
+        if (outRightGrabbed && outRightGrabbed->baseForm && IsTwoHandedMeleeBaseForm(outRightGrabbed->baseForm))
+            return outRightGrabbed->baseForm;
+
+        EquipManager* equipMgr = EquipManager::GetSingleton();
+        for (int handIdx = 0; handIdx < 2; ++handIdx)
+        {
+            const bool isLeftGameHand = (handIdx == 0);
+            TESObjectREFR* dropped = equipMgr->GetDroppedWeaponRef(isLeftGameHand);
+            if (dropped && dropped->baseForm && IsTwoHandedMeleeBaseForm(dropped->baseForm))
+            {
+                if (isLeftGameHand)
+                    outLeftGrabbed = outLeftGrabbed ? outLeftGrabbed : dropped;
+                else
+                    outRightGrabbed = outRightGrabbed ? outRightGrabbed : dropped;
+                return dropped->baseForm;
+            }
+        }
+
+        if (higgsInterface->IsTwoHanding())
+            return ResolveTwoHandedMeleeFormFromPlayer();
+
+        return nullptr;
+    }
+
+    static void TryLogDualHand2HWeaponGrab()
+    {
+        static bool s_wasDualHand2HGrab = false;
+
+        if (!higgsInterface)
+        {
+            s_wasDualHand2HGrab = false;
+            return;
+        }
+
+        const bool leftHolding = higgsInterface->IsHoldingObject(true);
+        const bool rightHolding = higgsInterface->IsHoldingObject(false);
+        if (!leftHolding || !rightHolding)
+        {
+            s_wasDualHand2HGrab = false;
+            return;
+        }
+
+        TESObjectREFR* leftGrabbed = nullptr;
+        TESObjectREFR* rightGrabbed = nullptr;
+        TESForm* weaponForm = ResolveDualHand2HWeaponForm(leftGrabbed, rightGrabbed);
+        if (!weaponForm)
+        {
+            s_wasDualHand2HGrab = false;
+            return;
+        }
+
+        const bool twoHanding = higgsInterface->IsTwoHanding();
+        const bool sameGrabbedRef = leftGrabbed && rightGrabbed &&
+            (leftGrabbed == rightGrabbed ||
+                (leftGrabbed->baseForm && leftGrabbed->baseForm == rightGrabbed->baseForm));
+
+        const bool isDualHand2H = twoHanding || sameGrabbedRef ||
+            (leftHolding && rightHolding && weaponForm != nullptr);
+
+        if (isDualHand2H && !s_wasDualHand2HGrab)
+        {
+            // NOTE: runs on the HIGGS physics thread — do NOT call GetName() here (it can
+            // crash inside the game's form code). Log the formID only.
+            _MESSAGE("[FalseEdgeVR] 2H weapon grabbed in both hands: 0x%08X twoHanding=%d leftRef=0x%08X rightRef=0x%08X leftHold=%d rightHold=%d",
+                weaponForm->formID,
+                twoHanding ? 1 : 0,
+                leftGrabbed ? leftGrabbed->formID : 0u,
+                rightGrabbed ? rightGrabbed->formID : 0u,
+                leftHolding ? 1 : 0,
+                rightHolding ? 1 : 0);
+        }
+
+        s_wasDualHand2HGrab = isDualHand2H;
+    }
+
+    // Resolve the weapon ref currently grabbed in a game hand (HIGGS grab first, then
+    // the tracked dropped ref as a fallback).
+    static TESObjectREFR* ResolveGrabbedWeaponRefForGameHand(bool isLeftGameHand)
+    {
+        TESObjectREFR* ref = nullptr;
+        if (higgsInterface)
+        {
+            const bool vrControllerIsLeft = GameHandToVRController(isLeftGameHand);
+            ref = higgsInterface->GetGrabbedObject(vrControllerIsLeft);
+        }
+        if (!ref)
+            ref = EquipManager::GetSingleton()->GetDroppedWeaponRef(isLeftGameHand);
+        return ref;
+    }
+
+    // Find the nearest door in the player's cell that is within maxDist and that the
+    // player is roughly facing (forward/door-direction dot >= minFacingDot).
+    static TESObjectREFR* FindFacedDoorInFront(PlayerCharacter* player, float maxDist, float minFacingDot)
+    {
+        if (!player)
+            return nullptr;
+
+        TESObjectCELL* cell = player->parentCell;
+        if (!cell || !cell->refData.refArray)
+            return nullptr;
+
+        const NiPoint3 ppos = player->pos;
+        const float yaw = player->rot.z;
+        const float fx = sinf(yaw);   // Skyrim forward from yaw: (sin, cos)
+        const float fy = cosf(yaw);
+        const float maxDistSq = maxDist * maxDist;
+
+        TESObjectREFR* best = nullptr;
+        float bestDistSq = maxDistSq;
+
+        for (UInt32 i = 0; i < cell->refData.maxSize; i++)
+        {
+            if (!cell->refData.refArray[i].unk08 || !cell->refData.refArray[i].ref)
+                continue;
+
+            TESObjectREFR* ref = cell->refData.refArray[i].ref;
+            if (!ref->baseForm || ref->baseForm->formType != kFormType_Door)
+                continue;
+
+            const float dx = ref->pos.x - ppos.x;
+            const float dy = ref->pos.y - ppos.y;
+            const float distSq = dx * dx + dy * dy;
+            if (distSq > maxDistSq || distSq < 1.0f)
+                continue;
+
+            const float dist = sqrtf(distSq);
+            const float dot = (fx * dx + fy * dy) / dist;
+            if (dot < minFacingDot)
+                continue;  // door is not in front / player not facing it
+
+            if (distSq < bestDistSq)
+            {
+                bestDistSq = distSq;
+                best = ref;
+            }
+        }
+
+        return best;
+    }
+
+    // Door-stow state for the dual-2H-grab-facing-door scenario.
+    static bool s_doorStowActive = false;
+    static UInt32 s_doorStowLeftFormID = 0;
+    static UInt32 s_doorStowRightFormID = 0;
+
+    // Facing thresholds. Entry is stricter than the "stay stowed" exit check to provide
+    // hysteresis and avoid rapid stow/re-equip toggling at the boundary. The proximity
+    // (distance) is tunable via the INI; the stay-distance adds a fixed hysteresis margin.
+    static const float kDoorEnterDot = 0.64f;      // ~50 degrees
+    static const float kDoorStayDot = 0.50f;       // ~60 degrees
+    static const float kDoorStayDistMargin = 84.0f; // extra units kept stowed before re-equip
+
+    // When the player is grabbing a distinct 2H melee weapon in EACH hand while facing a
+    // door, safe-stow both weapons to inventory (no spawn, no duplicate) and cache their
+    // base forms. While they keep facing the door they stay stowed. Once they turn away,
+    // re-equip the cached weapons — the normal equip flow auto-grabs them again.
+    static void UpdateDoorStowForDual2HGrab()
+    {
+        if (!twoHandedTrackingEnabled || !doorStowDual2HEnabled)
+            return;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player || !higgsInterface)
+            return;
+
+        const float enterDist = doorStowDual2HProximity;
+        const float stayDist = doorStowDual2HProximity + kDoorStayDistMargin;
+
+        EquipManager* mgr = EquipManager::GetSingleton();
+
+        if (!s_doorStowActive)
+        {
+            TESObjectREFR* left = ResolveGrabbedWeaponRefForGameHand(true);
+            TESObjectREFR* right = ResolveGrabbedWeaponRefForGameHand(false);
+
+            const bool dual2H = left && right && left != right &&
+                left->baseForm && right->baseForm &&
+                IsTwoHandedMeleeBaseForm(left->baseForm) &&
+                IsTwoHandedMeleeBaseForm(right->baseForm);
+            if (!dual2H)
+                return;
+
+            TESObjectREFR* door = FindFacedDoorInFront(player, enterDist, kDoorEnterDot);
+            if (!door)
+                return;
+
+            // Cache base forms BEFORE stowing so we can re-equip later.
+            s_doorStowLeftFormID = left->baseForm->formID;
+            s_doorStowRightFormID = right->baseForm->formID;
+
+            // NOTE: runs on the HIGGS physics thread — do NOT call GetName() here (it can
+            // crash inside the game's form code). Log formIDs only.
+            _MESSAGE("[FalseEdgeVR] Dual 2H grabbed (one per hand) while facing door: left=0x%08X right=0x%08X door=0x%08X — stowing to inventory",
+                s_doorStowLeftFormID, s_doorStowRightFormID, door->formID);
+
+            // Return both grabbed weapons to inventory (AddItem + delete world copy, no
+            // spawn) and clear all grab tracking.
+            mgr->PickUpGrabbedWeaponBeforeEquip(true, true);
+            mgr->PickUpGrabbedWeaponBeforeEquip(false, true);
+
+            s_doorStowActive = true;
+            return;
+        }
+
+        // Stowed: keep stowed while still facing a nearby door (lenient hysteresis).
+        if (FindFacedDoorInFront(player, stayDist, kDoorStayDot))
+            return;
+
+        // No longer facing the door — re-equip the cached weapons. The normal equip flow
+        // converts them back to the grabbed state via our existing functionality.
+        _MESSAGE("[FalseEdgeVR] No longer facing door — re-equipping stowed 2H weapons: left=0x%08X right=0x%08X",
+            s_doorStowLeftFormID, s_doorStowRightFormID);
+
+        if (s_doorStowRightFormID != 0)
+        {
+            TESForm* rightForm = LookupFormByID(s_doorStowRightFormID);
+            if (rightForm)
+                mgr->EquipWeaponToGameHand(player, rightForm, false);
+        }
+        if (s_doorStowLeftFormID != 0)
+        {
+            TESForm* leftForm = LookupFormByID(s_doorStowLeftFormID);
+            if (leftForm)
+                mgr->EquipWeaponToGameHand(player, leftForm, true);
+        }
+
+        s_doorStowLeftFormID = 0;
+        s_doorStowRightFormID = 0;
+        s_doorStowActive = false;
+    }
+
+    static bool EquipGrabbedWeaponForGameHand(bool isLeftGameHand, bool forceEquip = false)
+    {
+        if (!forceEquip && IsGrabEquipBlockedByOppositeHand2HTriggerHold(isLeftGameHand))
+            return false;
+
+        if (!forceEquip && IsMainHandGrabEquipBlockedByOffHand2HSkill(isLeftGameHand))
+            return false;
+
+        if (!forceEquip && IsOffHandGrabEquipBlockedByLockedMainHand2H(isLeftGameHand))
+            return false;
+
         EquipManager* equipMgr = EquipManager::GetSingleton();
         TESObjectREFR* droppedWeapon = equipMgr->GetDroppedWeaponRef(isLeftGameHand);
         if (!IsDroppedWeaponRefReadable(droppedWeapon))
@@ -220,10 +653,63 @@ namespace FalseEdgeVR
         return true;
     }
 
-    static void ForceEquipAllGrabbedWeaponsForDoorTransition()
+    static void ForceEquipAllGrabbedWeapons()
     {
-        EquipGrabbedWeaponForGameHand(true);
-        EquipGrabbedWeaponForGameHand(false);
+        EquipGrabbedWeaponForGameHand(true, true);
+        EquipGrabbedWeaponForGameHand(false, true);
+    }
+
+    // When the main (right) hand has a 2H melee weapon equipped, the off (left) hand
+    // can only legitimately hold a separate weapon via mods like 2hWeaponsUnlocked.
+    // Returns true (and unequips) if such a distinct off-hand weapon is present.
+    static bool UnequipOffHandWeaponWhenMainHandHas2H()
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        TESForm* mainEquipped = player->GetEquippedObject(false);
+        if (!IsTwoHandedMeleeBaseForm(mainEquipped))
+            return false;
+
+        TESForm* offEquipped = player->GetEquippedObject(true);
+        // A lone 2H spans both slots and reports as the same form on the left — skip it.
+        if (!offEquipped || offEquipped == mainEquipped ||
+            offEquipped->formType != kFormType_Weapon)
+            return false;
+
+        return EquipManager::GetSingleton()->FullUnequipHand(true);
+    }
+
+    static bool s_wasPlayerMounted = false;
+
+    static void UpdateMountWeaponState()
+    {
+        const bool mounted = IsPlayerMounted();
+
+        if (!mountWeaponHandlingEnabled)
+        {
+            s_wasPlayerMounted = mounted;
+            return;
+        }
+
+        if (mounted && !s_wasPlayerMounted)
+        {
+            s_pendingTriggerUnequipLeft = false;
+            s_pendingTriggerUnequipRight = false;
+            s_triggerUnequipTimerLeft = 0.0f;
+            s_triggerUnequipTimerRight = 0.0f;
+
+            ForceEquipAllGrabbedWeapons();
+            _MESSAGE("[FalseEdgeVR] Mounted — equipping grabbed weapons");
+        }
+        else if (!mounted && s_wasPlayerMounted)
+        {
+            EquipManager::GetSingleton()->HolsterAllEquippedWeaponHands();
+            _MESSAGE("[FalseEdgeVR] Dismounted — holstering equipped weapons to grab");
+        }
+
+        s_wasPlayerMounted = mounted;
     }
 
     static void ResolveGrabStateAfterDoorTransition()
@@ -267,6 +753,9 @@ namespace FalseEdgeVR
         if (IsAnyBlockingMenuOpen())
             return true;
 
+        if (mountWeaponHandlingEnabled && IsPlayerMounted())
+            return true;
+
         return IsDoorTransitionGuardActive();
     }
 
@@ -280,7 +769,16 @@ namespace FalseEdgeVR
         s_triggerUnequipTimerLeft = 0.0f;
         s_triggerUnequipTimerRight = 0.0f;
 
-        ForceEquipAllGrabbedWeaponsForDoorTransition();
+        // When activating a door with a 2H melee weapon equipped in the main (right)
+        // hand, any weapon equipped in the off (left) hand — 1H or 2H, e.g. via
+        // 2hWeaponsUnlocked — is unequipped straight back to inventory. The main hand
+        // keeps its weapon and follows the normal door-transition logic.
+        if (twoHandedTrackingEnabled && UnequipOffHandWeaponWhenMainHandHas2H())
+        {
+            _MESSAGE("[FalseEdgeVR] Door/cell transition — main-hand 2H equipped; unequipped off-hand weapon to inventory");
+        }
+
+        ForceEquipAllGrabbedWeapons();
 
         _MESSAGE("[FalseEdgeVR] Door/cell transition — force-equipping grabbed weapons for %.0fs",
             DOOR_TRANSITION_GUARD_SECONDS);
@@ -296,6 +794,243 @@ namespace FalseEdgeVR
 
         if (previous > 0.0f && s_doorTransitionGuardTimer <= 0.0f)
             s_pendingPostDoorGrabResolve = true;
+    }
+
+    static const char* GetFirstOpenBlockingMenuName()
+    {
+        MenuManager* mm = MenuManager::GetSingleton();
+        if (!mm)
+            return nullptr;
+
+        static BSFixedString blockingMenus[] = {
+            BSFixedString("Crafting Menu"),
+            BSFixedString("RaceSex Menu"),
+            BSFixedString("ContainerMenu"),
+            BSFixedString("BarterMenu"),
+            BSFixedString("GiftMenu"),
+            BSFixedString("Lockpicking Menu"),
+            BSFixedString("Book Menu"),
+            BSFixedString("Sleep/Wait Menu"),
+            BSFixedString("Loading Menu"),
+            BSFixedString("Fader Menu"),
+            BSFixedString("Journal Menu"),
+            BSFixedString("MapMenu"),
+            BSFixedString("InventoryMenu"),
+            BSFixedString("MagicMenu"),
+            BSFixedString("FavoritesMenu"),
+            BSFixedString("StatsMenu"),
+            BSFixedString("Training Menu"),
+            BSFixedString("MessageBoxMenu"),
+            BSFixedString("Console"),
+            BSFixedString("Dialogue Menu"),
+            BSFixedString("TweenMenu"),
+            BSFixedString("MainMenu"),
+        };
+
+        for (BSFixedString& menuName : blockingMenus)
+        {
+            if (mm->IsMenuOpen(&menuName))
+                return menuName.data;
+        }
+
+        return nullptr;
+    }
+
+    static bool HasTrackableWeaponEquipped(bool isLeftGameHand)
+    {
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        TESForm* equipped = player->GetEquippedObject(isLeftGameHand);
+        return equipped && EquipManager::IsWeapon(equipped);
+    }
+
+    static bool IsFalseEdgeBypassActive(VRInputHandler* handler)
+    {
+        if (handler->IsPaused())
+            return true;
+
+        if (IsAnyBlockingMenuOpen())
+            return true;
+
+        if (IsDoorTransitionGuardActive())
+            return true;
+
+        if (mountWeaponHandlingEnabled && IsPlayerMounted())
+            return true;
+
+        return false;
+    }
+
+    static bool BothHandsVanillaDefaultEquip(VRInputHandler* handler)
+    {
+        if (IsFalseEdgeBypassActive(handler))
+            return false;
+
+        if (!HasTrackableWeaponEquipped(true) || !HasTrackableWeaponEquipped(false))
+            return false;
+
+        EquipManager* equipMgr = EquipManager::GetSingleton();
+        if (equipMgr->GetDroppedWeaponRef(true) || equipMgr->GetDroppedWeaponRef(false))
+            return false;
+
+        return true;
+    }
+
+        static bool BothEquippedHandTriggersHeld()
+        {
+            const bool leftHandTrigger = GameHandToVRController(true) ?
+                s_leftTriggerPressed : s_rightTriggerPressed;
+            const bool rightHandTrigger = GameHandToVRController(false) ?
+                s_leftTriggerPressed : s_rightTriggerPressed;
+            return leftHandTrigger && rightHandTrigger;
+        }
+
+        static float GetTriggerUnequipDelayForHand(bool isLeftGameHand)
+        {
+            PlayerCharacter* player = *g_thePlayer;
+            if (!player)
+                return triggerUnequipDelay;
+
+            TESForm* equipped = player->GetEquippedObject(isLeftGameHand);
+            if (equipped && staffTrackingEnabled &&
+                EquipManager::GetWeaponType(equipped) == WeaponType::Staff)
+            {
+                return staffTriggerReleaseUnequipDelay;
+            }
+
+            return triggerUnequipDelay;
+        }
+
+        static void LogFalseEdgeDiagnosticContext(VRInputHandler* handler, bool pollTriggerRan, const char* eventLabel)
+    {
+        EquipManager* equipMgr = EquipManager::GetSingleton();
+        PlayerCharacter* player = *g_thePlayer;
+
+        TESForm* leftEquipped = player ? player->GetEquippedObject(true) : nullptr;
+        TESForm* rightEquipped = player ? player->GetEquippedObject(false) : nullptr;
+
+        const char* openMenu = GetFirstOpenBlockingMenuName();
+
+        _MESSAGE(
+            "[FalseEdgeVR] DIAG (%s): paused=%d menuOpen=%d menu=\"%s\" pollTrigger=%d "
+            "doorGuard=%.2fs postDoorResolve=%d mounted=%d mountHandling=%d "
+            "grabListen=%d holsterBlocked=%d higgs=%d "
+            "leftEq=0x%08X rightEq=0x%08X leftDropRef=%d rightDropRef=%d "
+            "leftPendingUnequip=%d rightPendingUnequip=%d leftPendingReequip=%d rightPendingReequip=%d "
+            "leftWeaponLock=%d rightWeaponLock=%d leftTrigger=%d rightTrigger=%d",
+            eventLabel,
+            handler->IsPaused() ? 1 : 0,
+            IsAnyBlockingMenuOpen() ? 1 : 0,
+            openMenu ? openMenu : "",
+            pollTriggerRan ? 1 : 0,
+            s_doorTransitionGuardTimer,
+            s_pendingPostDoorGrabResolve ? 1 : 0,
+            IsPlayerMounted() ? 1 : 0,
+            mountWeaponHandlingEnabled ? 1 : 0,
+            handler->IsListening() ? 1 : 0,
+            IsWeaponGrabToHolsterBlocked() ? 1 : 0,
+            higgsInterface ? 1 : 0,
+            leftEquipped ? leftEquipped->formID : 0u,
+            rightEquipped ? rightEquipped->formID : 0u,
+            equipMgr->GetDroppedWeaponRef(true) ? 1 : 0,
+            equipMgr->GetDroppedWeaponRef(false) ? 1 : 0,
+            s_pendingTriggerUnequipLeft ? 1 : 0,
+            s_pendingTriggerUnequipRight ? 1 : 0,
+            equipMgr->HasPendingReequip(true) ? 1 : 0,
+            equipMgr->HasPendingReequip(false) ? 1 : 0,
+            VRInputHandler::IsWeaponLocked(true) ? 1 : 0,
+            VRInputHandler::IsWeaponLocked(false) ? 1 : 0,
+            s_leftTriggerPressed ? 1 : 0,
+            s_rightTriggerPressed ? 1 : 0);
+    }
+
+    static void ForceRecoverVanillaDefaultEquip(VRInputHandler* handler, bool pollTriggerRan)
+    {
+        _MESSAGE("[FalseEdgeVR] DIAG: Vanilla default equip persisted for %.1fs — forcing equipped weapons back to grab state.",
+            vanillaDefaultRecoverySeconds);
+        LogFalseEdgeDiagnosticContext(handler, pollTriggerRan, "vanilla-default-recovery");
+
+        s_pendingTriggerUnequipLeft = false;
+        s_pendingTriggerUnequipRight = false;
+        s_triggerUnequipTimerLeft = 0.0f;
+        s_triggerUnequipTimerRight = 0.0f;
+
+        VRInputHandler::ClearWeaponLock(true);
+        VRInputHandler::ClearWeaponLock(false);
+
+        EquipManager::GetSingleton()->HolsterAllEquippedWeaponHands();
+    }
+
+    static void DiagnoseFalseEdgeTriggerHoldState(VRInputHandler* handler, bool pollTriggerRan, float deltaTime)
+    {
+        static bool s_prevBothHandsVanillaDefault = false;
+        static bool s_loggedStuckPause = false;
+        static int s_stuckPauseFrameCount = 0;
+        static float s_vanillaDefaultTimer = 0.0f;
+        static bool s_vanillaDefaultRecoveryTriggered = false;
+
+        const bool bothVanilla = BothHandsVanillaDefaultEquip(handler);
+        const bool bypass = IsFalseEdgeBypassActive(handler);
+
+        if (bothVanilla && !s_prevBothHandsVanillaDefault)
+        {
+            _MESSAGE("[FalseEdgeVR] DIAG: Both hands on vanilla default equip — False Edge trigger-hold is NOT managing either hand.");
+            LogFalseEdgeDiagnosticContext(handler, pollTriggerRan, "vanilla-default-enter");
+            s_vanillaDefaultTimer = 0.0f;
+            s_vanillaDefaultRecoveryTriggered = false;
+        }
+        else if (!bothVanilla && s_prevBothHandsVanillaDefault && !bypass)
+        {
+            _MESSAGE("[FalseEdgeVR] DIAG: False Edge trigger-hold active again (at least one hand holstered/equip-managed).");
+            LogFalseEdgeDiagnosticContext(handler, pollTriggerRan, "mod-managed-enter");
+            s_vanillaDefaultTimer = 0.0f;
+            s_vanillaDefaultRecoveryTriggered = false;
+        }
+
+        s_prevBothHandsVanillaDefault = bothVanilla;
+
+        const bool recoveryEligible = bothVanilla && !BothEquippedHandTriggersHeld();
+        if (recoveryEligible && vanillaDefaultRecoverySeconds > 0.0f && !s_vanillaDefaultRecoveryTriggered)
+        {
+            s_vanillaDefaultTimer += deltaTime;
+            if (s_vanillaDefaultTimer >= vanillaDefaultRecoverySeconds)
+            {
+                if (!IsWeaponGrabToHolsterBlocked())
+                {
+                    s_vanillaDefaultRecoveryTriggered = true;
+                    ForceRecoverVanillaDefaultEquip(handler, pollTriggerRan);
+                }
+            }
+        }
+        else if (!bothVanilla || bypass)
+        {
+            s_vanillaDefaultTimer = 0.0f;
+            s_vanillaDefaultRecoveryTriggered = false;
+        }
+
+        const bool stuckPause = handler->IsPaused() && !IsAnyBlockingMenuOpen();
+        if (stuckPause)
+        {
+            s_stuckPauseFrameCount++;
+            if (!s_loggedStuckPause && s_stuckPauseFrameCount >= 45)
+            {
+                s_loggedStuckPause = true;
+                _MESSAGE("[FalseEdgeVR] DIAG: Tracking paused but no blocking menu is open (stuck pause — trigger-hold suspended).");
+                LogFalseEdgeDiagnosticContext(handler, pollTriggerRan, "stuck-pause");
+            }
+        }
+        else
+        {
+            s_stuckPauseFrameCount = 0;
+            if (s_loggedStuckPause)
+            {
+                _MESSAGE("[FalseEdgeVR] DIAG: Stuck pause cleared — trigger polling resumed.");
+                LogFalseEdgeDiagnosticContext(handler, pollTriggerRan, "stuck-pause-cleared");
+            }
+            s_loggedStuckPause = false;
+        }
     }
 
     // Trigger button mask (SteamVR trigger button = button 33)
@@ -331,17 +1066,14 @@ namespace FalseEdgeVR
         {
             if (s_prevPlayerWeaponDrawn)
             {
+                // NOTE: physics thread — no GetName() (can crash in game form code).
                 if (left && EquipManager::IsWeapon(left))
                 {
-                    const char* name = left->GetName();
-                    _MESSAGE("[FalseEdgeVR] Weapon redrawn in LEFT game hand: %s (0x%08X)",
-                        name ? name : "(unnamed)", left->formID);
+                    _MESSAGE("[FalseEdgeVR] Weapon redrawn in LEFT game hand: 0x%08X", left->formID);
                 }
                 if (right && EquipManager::IsWeapon(right))
                 {
-                    const char* name = right->GetName();
-                    _MESSAGE("[FalseEdgeVR] Weapon redrawn in RIGHT game hand: %s (0x%08X)",
-                        name ? name : "(unnamed)", right->formID);
+                    _MESSAGE("[FalseEdgeVR] Weapon redrawn in RIGHT game hand: 0x%08X", right->formID);
                 }
             }
 
@@ -535,6 +1267,7 @@ namespace FalseEdgeVR
      {
    }
             frameCount++;
+            DiagnoseFalseEdgeTriggerHoldState(handler, false, deltaTime);
           return;
         }
 
@@ -543,6 +1276,8 @@ namespace FalseEdgeVR
             s_pendingPostDoorGrabResolve = false;
             ResolveGrabStateAfterDoorTransition();
         }
+
+        UpdateMountWeaponState();
   
         frameCount++;
   
@@ -554,6 +1289,9 @@ loggedOnce = true;
     
   // Poll trigger button state each frame
         PollTriggerState();
+
+        TryLogDualHand2HWeaponGrab();
+        UpdateDoorStowForDual2HGrab();
 
         PreventWeaponSheath();
    
@@ -588,6 +1326,8 @@ handler->m_leftHandOnCooldown = false;
         handler->CheckAutoEquipGrabbedWeapon(deltaTime);
         handler->UpdateShieldBashTracking(deltaTime);
         UpdateWeaponGeometry(deltaTime);
+
+        DiagnoseFalseEdgeTriggerHoldState(handler, true, deltaTime);
 
         // Reset the weapon lock for a game hand once it has been truly
         // unequipped (no weapon in that hand) for at least 0.3 seconds.
@@ -768,7 +1508,7 @@ handler->m_leftHandOnCooldown = false;
         EquipManager::GetSingleton()->TryLog2HLeftHandWithRightGameHandTrigger(nullptr);
     }
 
-    // Check if this is a valid 1H weapon we track (not 2H, bows, staffs, bound weapons, excluded items)
+    // Check if this is a valid tracked weapon (bows/bound/excluded items are skipped above)
        if (!EquipManager::IsWeapon(baseForm))
    {
    return;
@@ -883,6 +1623,8 @@ handler->m_autoEquipTimerLeft = 0.0f;
   else
   {
         }
+
+        TryLogDualHand2HWeaponGrab();
     }
 
     void VRInputHandler::OnDropped(bool isLeftVRController, TESObjectREFR* droppedRefr)
@@ -1086,8 +1828,15 @@ NiPoint3 handPos = handNode->m_worldTransform.pos;
          const PlayerEquipState& equipState = EquipManager::GetSingleton()->GetEquipState();
             bool otherHandHasWeapon = isLeftGameHand ? 
     equipState.rightHand.isEquipped : equipState.leftHand.isEquipped;
-   
-        if (otherHandHasWeapon && higgsInterface)
+
+            // A 2H weapon normally leaves the off-hand empty, so otherHandHasWeapon is
+            // false and this accidental-drop re-grab would be skipped. For 2H-skill
+            // weapons, allow the re-grab regardless of the off-hand state. (Intentional
+            // grip-spam drops already returned above, so reaching here means accidental.)
+            const bool is2HSkillWeapon = twoHandedTrackingEnabled &&
+                EquipManager::UsesTwoHandedSkill(droppedRefr->baseForm);
+
+        if ((otherHandHasWeapon || is2HSkillWeapon) && higgsInterface)
             {
    
             // Check if the hand can grab an object right now
@@ -1558,11 +2307,7 @@ if (m_autoEquipPendingLeft && m_autoEquipWeaponLeft)
 
     void VRInputHandler::OnStartTwoHanding()
     {
-
-        VRInputHandler* handler = GetSingleton();
-        if (handler->IsListening())
-        {
-     }
+        TryLogDualHand2HWeaponGrab();
     }
 
     void VRInputHandler::OnStopTwoHanding()
@@ -1606,6 +2351,8 @@ if (m_autoEquipPendingLeft && m_autoEquipWeaponLeft)
 
         s_leftTriggerBeforeRight = false;
         s_dualTriggerLeftRestoreIssued = false;
+
+        s_wasPlayerMounted = IsPlayerMounted();
 
         // Clear shield bash tracking completely on death/load
         m_shieldBashCount = 0;
@@ -1902,21 +2649,19 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                     PlayerCharacter* player = *g_thePlayer;
                     TESForm* equipped = player ? player->GetEquippedObject(isLeftGameHand) : nullptr;
                     bool stillEquipped = equipped && equipped->formID == weaponFormID;
-                    const char* weaponName = leftGrabbed->baseForm->GetName();
+                    // NOTE: physics thread — no GetName() (can crash in game form code).
                     if (stillEquipped)
                     {
-                        _MESSAGE("[FalseEdgeVR] Weapon sheathed (still equipped) via %s shoulder holster in %s game hand: %s (0x%08X)",
+                        _MESSAGE("[FalseEdgeVR] Weapon sheathed (still equipped) via %s shoulder holster in %s game hand: 0x%08X",
                             shoulderSide,
                             isLeftGameHand ? "LEFT" : "RIGHT",
-                            weaponName ? weaponName : "(unnamed)",
                             weaponFormID);
                     }
                     else
                     {
-                        _MESSAGE("[FalseEdgeVR] Weapon holstered to %s shoulder in %s game hand (not equipped): %s (0x%08X)",
+                        _MESSAGE("[FalseEdgeVR] Weapon holstered to %s shoulder in %s game hand (not equipped): 0x%08X",
                             shoulderSide,
                             isLeftGameHand ? "LEFT" : "RIGHT",
-                            weaponName ? weaponName : "(unnamed)",
                             weaponFormID);
                     }
 
@@ -1947,21 +2692,19 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                     PlayerCharacter* player = *g_thePlayer;
                     TESForm* equipped = player ? player->GetEquippedObject(isRightGameHand) : nullptr;
                     bool stillEquipped = equipped && equipped->formID == weaponFormID;
-                    const char* weaponName = rightGrabbed->baseForm->GetName();
+                    // NOTE: physics thread — no GetName() (can crash in game form code).
                     if (stillEquipped)
                     {
-                        _MESSAGE("[FalseEdgeVR] Weapon sheathed (still equipped) via %s shoulder holster in %s game hand: %s (0x%08X)",
+                        _MESSAGE("[FalseEdgeVR] Weapon sheathed (still equipped) via %s shoulder holster in %s game hand: 0x%08X",
                             shoulderSide,
                             isRightGameHand ? "LEFT" : "RIGHT",
-                            weaponName ? weaponName : "(unnamed)",
                             weaponFormID);
                     }
                     else
                     {
-                        _MESSAGE("[FalseEdgeVR] Weapon holstered to %s shoulder in %s game hand (not equipped): %s (0x%08X)",
+                        _MESSAGE("[FalseEdgeVR] Weapon holstered to %s shoulder in %s game hand (not equipped): 0x%08X",
                             shoulderSide,
                             isRightGameHand ? "LEFT" : "RIGHT",
-                            weaponName ? weaponName : "(unnamed)",
                             weaponFormID);
                     }
 
@@ -2029,16 +2772,25 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                 // Check if we've hit the threshold within the time window
                 if (s_leftTriggerPressCount >= triggerSpamThreshold && s_leftTriggerSpamWindowTimer <= triggerSpamWindow)
                 {
-                    // Toggle weapon lock state
-                    s_leftWeaponLocked = !s_leftWeaponLocked;
                     s_leftTriggerPressCount = 0;
                     s_leftTriggerSpamWindowTimer = 0.0f;
 
-                    if (s_leftWeaponLocked)
+                    // Block locking a 2H-skill weapon while the opposite hand's 2H-skill
+                    // weapon is already locked (only one may be locked at a time).
+                    const bool wouldEngage = !s_leftWeaponLocked;
+                    if (wouldEngage && IsTwoHandedSkillLockBlockedByOppositeHand(true))
                     {
+                        _MESSAGE("[FalseEdgeVR] 2H weapon lock blocked on LEFT controller — opposite hand 2H weapon is already locked");
                     }
                     else
                     {
+                        // Toggle weapon lock state
+                        s_leftWeaponLocked = !s_leftWeaponLocked;
+
+                        if (s_leftWeaponLocked)
+                        {
+                            LogWeaponLockIf2HSkill(true);
+                        }
                     }
                 }
             }
@@ -2113,16 +2865,25 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                 // Check if we've hit the threshold within the time window
                 if (s_rightTriggerPressCount >= triggerSpamThreshold && s_rightTriggerSpamWindowTimer <= triggerSpamWindow)
                 {
-                    // Toggle weapon lock state
-                    s_rightWeaponLocked = !s_rightWeaponLocked;
                     s_rightTriggerPressCount = 0;
                     s_rightTriggerSpamWindowTimer = 0.0f;
 
-                    if (s_rightWeaponLocked)
+                    // Block locking a 2H-skill weapon while the opposite hand's 2H-skill
+                    // weapon is already locked (only one may be locked at a time).
+                    const bool wouldEngage = !s_rightWeaponLocked;
+                    if (wouldEngage && IsTwoHandedSkillLockBlockedByOppositeHand(false))
                     {
+                        _MESSAGE("[FalseEdgeVR] 2H weapon lock blocked on RIGHT controller — opposite hand 2H weapon is already locked");
                     }
                     else
                     {
+                        // Toggle weapon lock state
+                        s_rightWeaponLocked = !s_rightWeaponLocked;
+
+                        if (s_rightWeaponLocked)
+                        {
+                            LogWeaponLockIf2HSkill(false);
+                        }
                     }
                 }
             }
@@ -2471,20 +3232,19 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                 s_grabEquipTapStateRight = 0;
             }
 
-            // During door/cell transition, keep any remaining grabbed weapons equipped.
+            // During door/cell transition or while mounted, keep grabbed weapons equipped
+            // and do not start holster timers.
             if (IsDoorTransitionGuardActive())
             {
-                ForceEquipAllGrabbedWeaponsForDoorTransition();
+                ForceEquipAllGrabbedWeapons();
             }
+
+            if (IsDoorTransitionGuardActive() || (mountWeaponHandlingEnabled && IsPlayerMounted()))
+                return;
 
             // ============================================
     // TRIGGER RELEASED - Start delayed unequip timer for EACH hand
       // ============================================
-
-            if (IsDoorTransitionGuardActive())
-                return;
-
-            // LEFT hand trigger released
             bool leftVRTriggerWas = GameHandToVRController(true) ? s_leftTriggerWasPressed : s_rightTriggerWasPressed;
             bool leftVRTriggerNow = GameHandToVRController(true) ? s_leftTriggerPressed : s_rightTriggerPressed;
 
@@ -2504,9 +3264,9 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                         // Check if weapon is locked - if so, don't start unequip timer
                         if (leftWeaponIsLocked)
                         {
-                            const char* weaponName = leftEquipped->GetName();
-                            _MESSAGE("[FalseEdgeVR] Trigger released with weapon lock (still equipped) in LEFT game hand: %s (0x%08X)",
-                                weaponName ? weaponName : "(unnamed)", leftEquipped->formID);
+                            // NOTE: physics thread — no GetName() (can crash in game form code).
+                            _MESSAGE("[FalseEdgeVR] Trigger released with weapon lock (still equipped) in LEFT game hand: 0x%08X",
+                                leftEquipped->formID);
                         }
                         else
                         {
@@ -2537,9 +3297,9 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                         // Check if weapon is locked - if so, don't start unequip timer
                         if (rightWeaponIsLocked)
                         {
-                            const char* weaponName = rightEquipped->GetName();
-                            _MESSAGE("[FalseEdgeVR] Trigger released with weapon lock (still equipped) in RIGHT game hand: %s (0x%08X)",
-                                weaponName ? weaponName : "(unnamed)", rightEquipped->formID);
+                            // NOTE: physics thread — no GetName() (can crash in game form code).
+                            _MESSAGE("[FalseEdgeVR] Trigger released with weapon lock (still equipped) in RIGHT game hand: 0x%08X",
+                                rightEquipped->formID);
                         }
                         else
                         {
@@ -2572,9 +3332,9 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                     continue;
                 }
 
-                // PROCESS after delay
+                // PROCESS after delay (staffs use a longer fire-and-forget window)
                 timer += 0.011f;  // ~90fps
-                if (timer < triggerUnequipDelay)
+                if (timer < GetTriggerUnequipDelayForHand(isLeftHand))
                     continue;
 
                 if (IsDoorTransitionGuardActive())

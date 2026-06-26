@@ -12,6 +12,7 @@ namespace FalseEdgeVR
 	extern SKSEVRInterface* g_vrInterface;
 	extern PluginHandle g_pluginHandle;
 	extern SKSETaskInterface* g_task;
+	extern const PluginInfo* (* g_getPluginInfo)(const char* name);
 
 	void StartMod();
 
@@ -33,6 +34,9 @@ namespace FalseEdgeVR
 	// Convert game hand to VR controller
 	// Returns: true = left VR controller, false = right VR controller
 	bool GameHandToVRController(bool isLeftGameHand);
+
+	// True when the player is riding a mount (horse, dragon, etc.).
+	bool IsPlayerMounted(Actor* actor = nullptr);
 
 	// Get which game hand should be unequipped during dual-wield collision (from INI)
 	bool GetCollisionAvoidanceHandIsLeft();
