@@ -40,6 +40,7 @@ namespace BarebonesVR
 			std::string logMsg("BarebonesVR: ");
 			logMsg.append(BarebonesVR::MOD_VERSION_STR);
 			_MESSAGE(logMsg.c_str());
+			_MESSAGE("[2hWeaponsUnlocked] Custom build: NoHiggsGripTransfer-r2 (opposite-grip companion)");
 
 			// populate info structure
 			info->infoVersion = PluginInfo::kInfoVersion;

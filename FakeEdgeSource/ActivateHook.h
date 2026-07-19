@@ -1,6 +1,7 @@
 #pragma once
 
 #include "skse64/GameReferences.h"
+#include "skse64/PluginAPI.h"
 #include "skse64_common/Relocation.h"
 #include "skse64_common/BranchTrampoline.h"
 
@@ -26,6 +27,12 @@ namespace FalseEdgeVR
     
     // Sets up the activate hook - call this during mod initialization
     void SetupActivateHook();
+
+    // Track Skyrim's current interaction target through SKSE's real crosshair
+    // dispatcher.  This preserves grip activation while either trigger-held or
+    // opposite-grip temporary weapon mode is active.
+    void RegisterPromptActivationSupport(SKSEMessagingInterface* messaging);
+    bool TryActivateTrackedPrompt(const char* sourceLabel);
 
     // Hook game EquipManager::EquipItem to pick up conflicting grabbed weapons before equipping.
     void SetupEquipItemHook();

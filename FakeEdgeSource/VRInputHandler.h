@@ -82,6 +82,20 @@ namespace FalseEdgeVR
         
         // Check if grip is held for the VR controller corresponding to a game hand
         static bool IsGripHeldForGameHand(bool isLeftGameHand);
+
+        // True while an opposite-hand grip is temporarily keeping a 2H collision
+        // weapon equipped in its original game hand.  The optional FormID keeps
+        // unrelated equip events in the same hand from inheriting the exemption.
+        static bool IsOppositeGrip2HActiveForGameHand(bool isLeftGameHand, UInt32 weaponFormID = 0);
+
+        // Form-wide guard used while Skyrim/2hWeaponsUnlocked may briefly report
+        // the transition weapon in the opposite worn slot.
+        static bool IsOppositeGrip2HTransitionWeapon(UInt32 weaponFormID);
+
+        // Used by the narrowly-scoped HIGGS compatibility hook to silence
+        // physics grab/drop audio during the tracked conversion and its short
+        // collision-restore completion window.
+        static bool ShouldSuppressHiggsPhysicsSound();
       
         // ============================================
         // Drop Protection Override (Grip Spam Detection)

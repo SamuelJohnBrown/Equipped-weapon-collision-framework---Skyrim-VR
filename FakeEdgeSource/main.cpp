@@ -2,6 +2,7 @@
 #include <shlobj.h>
 #include <intrin.h>
 #include <string>
+#include <cstring>
 #include <xbyak/xbyak.h>
 
 #include "skse64/PluginAPI.h"	
@@ -10,11 +11,13 @@
 #include "VRInputHandler.h"
 #include "WeaponGeometry.h"
 #include "ActivateHook.h"
+#include "SkyrimEventSinkCompat.h"
 #include "skse64/GameEvents.h"
 #include "skse64/GameMenus.h"
 #include "skse64/PapyrusEvents.h"
 
 #include "skse64_common/BranchTrampoline.h"
+#include "skse64_common/SafeWrite.h"
 
 namespace FalseEdgeVR
 {
@@ -26,6 +29,172 @@ namespace FalseEdgeVR
 	SKSETaskInterface* g_task = NULL;
 
 	SKSEVRInterface* g_vrInterface = nullptr;
+
+	// HIGGS 1.10.10 deliberately rejects a main/right support hand trying to
+	// two-hand a two-handed melee weapon equipped in the off/left hand.  Fake
+	// Edge's symmetric opposite-grip mode needs that one case.  Patch only the
+	// two validated melee-type branches; the crossbow branch and every other
+	// HIGGS grab rule remain untouched.
+	static constexpr unsigned int kSupportedHiggsBuild = 1101000;
+	static constexpr uintptr_t kHiggsCanTwoHandTwoHandSwordBranchRva = 0x278A5;
+	static constexpr uintptr_t kHiggsCanTwoHandTwoHandAxeBranchRva = 0x278AE;
+	static constexpr uintptr_t kHiggsPlayPhysicsSoundRva = 0x18500;
+
+	using HiggsPlayPhysicsSound = void (*)(
+		void* hand, const NiPoint3& location, bool loud);
+	static HiggsPlayPhysicsSound s_originalHiggsPlayPhysicsSound = nullptr;
+
+	static void HookHiggsPlayPhysicsSound(
+		void* hand, const NiPoint3& location, bool loud)
+	{
+		if (VRInputHandler::ShouldSuppressHiggsPhysicsSound())
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] Suppressed HIGGS physics sound for opposite-grip 2H transition");
+			return;
+		}
+
+		if (s_originalHiggsPlayPhysicsSound)
+			s_originalHiggsPlayPhysicsSound(hand, location, loud);
+	}
+
+	static bool InstallExactHiggsSoundHook(uintptr_t functionAddress)
+	{
+		// Exact HIGGS 1.10.10 PlayPhysicsSound prologue.  Thirteen bytes ends
+		// on an instruction boundary immediately before the first body load.
+		static constexpr UInt8 expectedPrologue[] = {
+			0x40, 0x53, 0x55, 0x56, 0x57, 0x41, 0x56,
+			0x41, 0x57, 0x48, 0x83, 0xEC, 0x38
+		};
+		if (std::memcmp(
+				reinterpret_cast<const void*>(functionAddress),
+				expectedPrologue, sizeof(expectedPrologue)) != 0)
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS transition-audio hook skipped: "
+				"PlayPhysicsSound byte signature did not match");
+			return false;
+		}
+
+		const size_t prologueSize = sizeof(expectedPrologue);
+		UInt8* trampoline = reinterpret_cast<UInt8*>(
+			g_localTrampoline.Allocate(prologueSize + 14));
+		if (!trampoline)
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS transition-audio hook skipped: "
+				"local trampoline allocation failed");
+			return false;
+		}
+
+		std::memcpy(
+			trampoline, reinterpret_cast<const void*>(functionAddress), prologueSize);
+		trampoline[prologueSize + 0] = 0xFF;
+		trampoline[prologueSize + 1] = 0x25;
+		trampoline[prologueSize + 2] = 0x00;
+		trampoline[prologueSize + 3] = 0x00;
+		trampoline[prologueSize + 4] = 0x00;
+		trampoline[prologueSize + 5] = 0x00;
+		const uintptr_t jumpBack = functionAddress + prologueSize;
+		std::memcpy(trampoline + prologueSize + 6, &jumpBack, sizeof(jumpBack));
+		s_originalHiggsPlayPhysicsSound =
+			reinterpret_cast<HiggsPlayPhysicsSound>(trampoline);
+
+		// HIGGS may be loaded more than 2 GB away from SKSE's shared branch
+		// trampoline.  BranchTrampoline::Write5Branch asserts in that case.
+		// Hook the nearby FalseEdgeVR module directly instead; SafeWriteJump
+		// range-checks the rel32 displacement and fails without crashing.
+		if (!SafeWriteJump(
+				functionAddress,
+				reinterpret_cast<uintptr_t>(&HookHiggsPlayPhysicsSound)))
+		{
+			s_originalHiggsPlayPhysicsSound = nullptr;
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS transition-audio hook skipped: "
+				"direct jump outside rel32 range");
+			return false;
+		}
+
+		_MESSAGE(
+			"[FalseEdgeVR] HIGGS transition-audio suppression hook installed");
+		return true;
+	}
+
+	static void InstallHiggsTransitionAudioCompatibility()
+	{
+		if (!higgsInterface ||
+			higgsInterface->GetBuildNumber() != kSupportedHiggsBuild)
+		{
+			return;
+		}
+
+		HMODULE higgsModule = GetModuleHandleA("higgs_vr.dll");
+		if (!higgsModule)
+			return;
+
+		InstallExactHiggsSoundHook(
+			reinterpret_cast<uintptr_t>(higgsModule) +
+			kHiggsPlayPhysicsSoundRva);
+	}
+
+	static void InstallHiggsOppositeGripCompatibility()
+	{
+		if (!higgsInterface)
+			return;
+
+		const unsigned int build = higgsInterface->GetBuildNumber();
+		if (build != kSupportedHiggsBuild)
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS left-owned 2H compatibility skipped: "
+				"unsupported build %u (expected %u)",
+				build, kSupportedHiggsBuild);
+			return;
+		}
+
+		HMODULE higgsModule = GetModuleHandleA("higgs_vr.dll");
+		if (!higgsModule)
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS left-owned 2H compatibility skipped: "
+				"higgs_vr.dll module not found");
+			return;
+		}
+
+		const uintptr_t base = reinterpret_cast<uintptr_t>(higgsModule);
+		UInt8* swordBranch = reinterpret_cast<UInt8*>(
+			base + kHiggsCanTwoHandTwoHandSwordBranchRva);
+		UInt8* axeBranch = reinterpret_cast<UInt8*>(
+			base + kHiggsCanTwoHandTwoHandAxeBranchRva);
+		static constexpr UInt8 expectedSwordBranch[] = {
+			0x0F, 0x84, 0x99, 0x00, 0x00, 0x00
+		};
+		static constexpr UInt8 expectedAxeBranch[] = {
+			0x0F, 0x84, 0x90, 0x00, 0x00, 0x00
+		};
+
+		if (std::memcmp(
+				swordBranch, expectedSwordBranch, sizeof(expectedSwordBranch)) != 0 ||
+			std::memcmp(
+				axeBranch, expectedAxeBranch, sizeof(expectedAxeBranch)) != 0)
+		{
+			_MESSAGE(
+				"[FalseEdgeVR] HIGGS left-owned 2H compatibility skipped: "
+				"CanTwoHand byte signature did not match");
+			return;
+		}
+
+		// Retarget HIGGS's two melee-type true branches from its shared false
+		// return to its shared true return.  Only the 32-bit branch displacement
+		// changes; instruction lengths and stack behavior are identical.
+		SafeWrite32(
+			base + kHiggsCanTwoHandTwoHandSwordBranchRva + 2, 0x0000018E);
+		SafeWrite32(
+			base + kHiggsCanTwoHandTwoHandAxeBranchRva + 2, 0x00000185);
+		_MESSAGE(
+			"[FalseEdgeVR] HIGGS left-owned 2H support compatibility installed "
+			"(build %u; sword/axe only)", build);
+	}
 
 	#pragma comment(lib, "Ws2_32.lib")
 
@@ -133,7 +302,7 @@ namespace FalseEdgeVR
 		static MenuEventHandler* GetSingleton()
 		{
 			static MenuEventHandler instance;
-			return &instance;
+			return MakeSkyrimEventSinkCompatible(&instance);
 		}
 
 	private:
@@ -164,7 +333,7 @@ namespace FalseEdgeVR
 		static DeathEventHandler* GetSingleton()
 		{
 			static DeathEventHandler instance;
-			return &instance;
+			return MakeSkyrimEventSinkCompatible(&instance);
 		}
 
 	private:
@@ -322,11 +491,16 @@ namespace FalseEdgeVR
 		if (eventDispatcher)
 		{
 			eventDispatcher->deathDispatcher.AddEventSink(DeathEventHandler::GetSingleton());
-			eventDispatcher->unk630.AddEventSink(HitEventHandler::GetSingleton());
+			// The published SKSEVR dispatcher-list layout does not expose a safe
+			// TESHitEvent source here.  This handler only forwards to the current
+			// no-op OnWeaponSwing stub, so do not risk corrupting startup by
+			// registering against the ambiguous unk630 slot.
+			_MESSAGE("[FalseEdgeVR] TESHitEvent sink skipped (unsafe SKSEVR dispatcher slot)");
 		}
 		
 		g_actionEventDispatcher.AddEventSink(WeaponSwingEventHandler::GetSingleton());
 		g_actionEventDispatcher.AddEventSink(WeaponSheatheEventHandler::GetSingleton());
+		RegisterPromptActivationSupport(g_messaging);
 		
 		MenuManager* menuManager = MenuManager::GetSingleton();
 		if (menuManager)
@@ -352,6 +526,7 @@ namespace FalseEdgeVR
 			std::string logMsg("FalseEdgeVR: ");
 			logMsg.append(FalseEdgeVR::MOD_VERSION_STR);
 			_MESSAGE(logMsg.c_str());
+			_MESSAGE("[FalseEdgeVR] Custom build: OppositeGrip2H-r17 (tidied stable opposite-grip build)");
 
 			// populate info structure
 			info->infoVersion = PluginInfo::kInfoVersion;
@@ -446,6 +621,10 @@ namespace FalseEdgeVR
 						_MESSAGE("Using legacy SKSE trampoline creation.");
 					}
 
+					// The HIGGS audio detour needs the local code-generation pool,
+					// which becomes available here rather than at PostPostLoad.
+					InstallHiggsTransitionAudioCompatibility();
+
 					FalseEdgeVR::GameLoad();
 					
 					// Setup Activate hook to block player from activating grabbed weapons
@@ -465,6 +644,10 @@ namespace FalseEdgeVR
 					if (!higgsInterface)
 					{
 						_MESSAGE("Did not get HIGGS interface - VR collision features will be disabled");
+					}
+					else
+					{
+						InstallHiggsOppositeGripCompatibility();
 					}
 
 					vrikInterface = vrikPluginApi::getVrikInterface001(g_pluginHandle, g_messaging);
