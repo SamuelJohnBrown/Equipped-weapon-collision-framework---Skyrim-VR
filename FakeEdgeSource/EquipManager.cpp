@@ -4,6 +4,7 @@
 #include "Engine.h"
 #include "SkyrimVRESLAPI.h"
 #include "ActivateHook.h"
+#include "SkyrimEventSinkCompat.h"
 #include "skse64/GameData.h"
 #include "skse64/GameForms.h"
 #include "skse64/GameExtraData.h"
@@ -20,6 +21,11 @@
 
 namespace
 {
+    // This custom build intentionally disables Fake Edge's player pickup,
+    // draw, and sheath effects.  Skyrim/HIGGS native pickup descriptors are
+    // additionally muted only while an opposite-grip conversion is in flight.
+    constexpr bool kDisablePlayerWeaponSounds = true;
+
     void CopyHotkeyExtraDataToWorldRef(BaseExtraList* source, TESObjectREFR* destRef)
     {
         if (!source || !destRef || destRef->extraData.GetByType(kExtraData_Hotkey))
@@ -385,6 +391,27 @@ namespace FalseEdgeVR
         }
     }
 
+    void EquipManager::ScheduleEquipWeaponToGameHand(UInt32 weaponFormID, bool isLeftGameHand)
+    {
+        if (weaponFormID == 0)
+            return;
+
+        _MESSAGE(
+            "[FalseEdgeVR] Queued explicit 2H equip: form=0x%08X game-hand=%s",
+            weaponFormID, isLeftGameHand ? "LEFT" : "RIGHT");
+
+        if (!g_task)
+        {
+            _ERROR(
+                "[FalseEdgeVR] Cannot queue explicit 2H equip: SKSE task interface unavailable");
+            return;
+        }
+
+        // HIGGS callbacks run during physics processing.  Always defer the
+        // inventory equip to SKSE's game-thread task queue.
+        g_task->AddTask(new DelayedEquipWeaponTask(weaponFormID, isLeftGameHand));
+    }
+
     void EquipManager::SchedulePickUpGrabbedWeaponBeforeEquip(bool isLeftGameHand)
     {
         bool& scheduled = isLeftGameHand ? s_scheduledGrabbedPickupLeft : s_scheduledGrabbedPickupRight;
@@ -428,7 +455,7 @@ namespace FalseEdgeVR
    static ContainerChangeEventHandler* GetSingleton()
         {
      static ContainerChangeEventHandler instance;
-            return &instance;
+            return MakeSkyrimEventSinkCompatible(&instance);
         }
         
         virtual EventResult ReceiveEvent(TESContainerChangedEvent* evn, EventDispatcher<TESContainerChangedEvent>* dispatcher) override;
@@ -447,7 +474,7 @@ namespace FalseEdgeVR
     EquipEventHandler* EquipEventHandler::GetSingleton()
     {
    static EquipEventHandler instance;
-        return &instance;
+        return MakeSkyrimEventSinkCompatible(&instance);
     }
 
     EventResult EquipEventHandler::ReceiveEvent(TESEquipEvent* evn, EventDispatcher<TESEquipEvent>* dispatcher)
@@ -833,7 +860,8 @@ case WeaponType::Axe:
     }
             }
          
-          if (!triggerHeld)
+          if (!triggerHeld &&
+              !VRInputHandler::IsOppositeGrip2HTransitionWeapon(item->formID))
         {
  // Delay the unequip slightly to let the equip complete.
       // Tracked per hand so the other hand's pending unequip is never clobbered.
@@ -862,7 +890,9 @@ case WeaponType::Axe:
    }
         
         // Log specific weapon types and play draw sounds (unless suppressed by collision logic or excluded weapons)
-    bool shouldExclude = IsExcludedWeaponFormID(item->formID);
+    bool shouldExclude = kDisablePlayerWeaponSounds ||
+        IsExcludedWeaponFormID(item->formID) ||
+        VRInputHandler::IsOppositeGrip2HTransitionWeapon(item->formID);
         
       // Check draw sound cooldown (5 seconds from last unequip of same weapon)
      bool onDrawCooldown = false;
@@ -948,7 +978,9 @@ case WeaponType::Axe:
      }
         
         // Check if this weapon should be excluded from sounds
-        bool shouldExclude = IsExcludedWeaponFormID(item->formID);
+        bool shouldExclude = kDisablePlayerWeaponSounds ||
+            IsExcludedWeaponFormID(item->formID) ||
+            VRInputHandler::IsOppositeGrip2HTransitionWeapon(item->formID);
         
   // Check sheath sound cooldown (5 seconds from last equip of same weapon)
  bool onSheathCooldown = false;
@@ -2282,12 +2314,42 @@ return true;
 
         if (!equipList)
         {
-  
-// If we couldn't get the equip list for the requested hand, we cannot safely unequip
- // Using the other hand's equip list would unequip the WRONG weapon!
-     // This can happen with same weapon in both hands - just abort
-    _MESSAGE("EquipManager::ForceUnequipAndGrab - Cannot get correct equip list, aborting to prevent wrong weapon unequip");
-  return false;
+            // 2hWeaponsUnlocked can represent a logically left-owned 2H
+            // transition weapon on the right worn list (and vice versa).  The
+            // normal safety rule must still abort for every unrelated weapon,
+            // but during our form-scoped opposite-grip transition it is safe to
+            // use the sole worn list and restore the collision reference to the
+            // recorded logical owner hand below.
+            if (VRInputHandler::IsOppositeGrip2HActiveForGameHand(
+                    isLeftGameHand, item->formID))
+            {
+                if (rightEquipList)
+                {
+                    equipList = rightEquipList;
+                    equipSlot = GetRightHandSlot();
+                }
+                else if (leftEquipList)
+                {
+                    equipList = leftEquipList;
+                    equipSlot = GetLeftHandSlot();
+                }
+
+                if (equipList)
+                {
+                    _MESSAGE(
+                        "[FalseEdgeVR] Opposite-grip release using actual 2H worn list: "
+                        "form=0x%08X logical-owner=%s actual-worn-slot=%s",
+                        item->formID,
+                        isLeftGameHand ? "LEFT" : "RIGHT",
+                        equipSlot == GetLeftHandSlot() ? "LEFT" : "RIGHT");
+                }
+            }
+
+            if (!equipList)
+            {
+                _MESSAGE("EquipManager::ForceUnequipAndGrab - Cannot get correct equip list, aborting to prevent wrong weapon unequip");
+                return false;
+            }
         }
 
    // ============================================
@@ -3202,6 +3264,15 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
 
         TESForm* weaponForm = pendingForm;
 
+        // The support grip, not the owner hand's trigger, controls this
+        // temporary equipped state.  Discard any stale trigger-generated
+        // auto-unequip that predates the opposite-grip transition.
+        if (VRInputHandler::IsOppositeGrip2HTransitionWeapon(weaponForm->formID))
+        {
+            pendingForm = nullptr;
+            return;
+        }
+
         // Clear the pending slot immediately
         pendingForm = nullptr;
 
@@ -3290,7 +3361,8 @@ BSExtraData* xCannotWear = equipList->GetByType(kExtraData_CannotWear);
         
      // Play the weapon pickup sound from Fake Edge VR.esp (ESL-flagged)
      // BUT skip if this is from our internal re-equip logic (SafeActivate)
-    if (EquipManager::s_suppressPickupSound)
+     if (kDisablePlayerWeaponSounds || EquipManager::s_suppressPickupSound ||
+         VRInputHandler::IsOppositeGrip2HTransitionWeapon(evn->itemFormId))
      {
           return kEvent_Continue;
      }

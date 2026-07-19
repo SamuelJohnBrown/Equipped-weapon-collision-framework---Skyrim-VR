@@ -97,63 +97,17 @@ namespace FalseEdgeVR
 	// soundFormId is the full FormID of the SOUN record
 	void PlaySoundAtPlayer(UInt32 soundFormId)
 	{
-		PlayerCharacter* player = *g_thePlayer;
-		if (!player)
-		{
-			_MESSAGE("[PlaySound] ERROR: Player not available");
-			return;
-		}
-
-		// Look up the sound form (SOUN type)
-		TESForm* form = LookupFormByID(soundFormId);
-		if (!form)
-		{
-			_MESSAGE("[PlaySound] ERROR: Failed to find sound form %08X", soundFormId);
-			return;
-		}
-
-		// Cast to TESSound (SOUN record)
-		TESSound* sound = DYNAMIC_CAST(form, TESForm, TESSound);
-		if (!sound)
-		{
-			_MESSAGE("[PlaySound] ERROR: Form %08X is not a TESSound (type=%d, expected=%d)",
-				soundFormId, form->formType, kFormType_Sound);
-			return;
-		}
-
-		// Play the sound using the Papyrus native function
-		PlaySoundEffect((*g_skyrimVM)->GetClassRegistry(), 0, sound, player);
+		(void)soundFormId;
+		// Intentionally silent in the opposite-grip build.
 	}
 
 	// Play a sound at any actor's location (NPC or player)
 	// soundFormId is the full FormID of the SOUN record
 	void PlaySoundAtActor(UInt32 soundFormId, Actor* actor)
 	{
-		if (!actor)
-		{
-			_MESSAGE("[PlaySound] ERROR: Actor not available");
-			return;
-		}
-
-		// Look up the sound form (SOUN type)
-		TESForm* form = LookupFormByID(soundFormId);
-		if (!form)
-		{
-			_MESSAGE("[PlaySound] ERROR: Failed to find sound form %08X", soundFormId);
-			return;
-		}
-
-		// Cast to TESSound (SOUN record)
-		TESSound* sound = DYNAMIC_CAST(form, TESForm, TESSound);
-		if (!sound)
-		{
-			_MESSAGE("[PlaySound] ERROR: Form %08X is not a TESSound (type=%d, expected=%d)",
-				soundFormId, form->formType, kFormType_Sound);
-			return;
-		}
-
-		// Play the sound using the Papyrus native function
-		PlaySoundEffect((*g_skyrimVM)->GetClassRegistry(), 0, sound, actor);
+		(void)soundFormId;
+		(void)actor;
+		// Intentionally silent in the opposite-grip build.
 	}
 
 	// Assign player ownership on an extra-data list (inventory stack or world ref).

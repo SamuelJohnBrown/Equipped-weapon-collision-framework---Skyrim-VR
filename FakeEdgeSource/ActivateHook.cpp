@@ -2,11 +2,14 @@
 #include "EquipManager.h"
 #include "Engine.h"
 #include "VRInputHandler.h"
+#include "SkyrimEventSinkCompat.h"
 #include "config.h"
 #include "skse64/GameReferences.h"
 #include "skse64/GameRTTI.h"
 #include "skse64/GameData.h"
+#include "skse64/PapyrusEvents.h"
 #include "skse64_common/SafeWrite.h"
+#include <chrono>
 #include <cstring>
 
 namespace FalseEdgeVR
@@ -26,6 +29,48 @@ namespace FalseEdgeVR
     
     // Bypass flag - our code sets this to true before calling activate
     bool g_bypassActivateBlock = false;
+
+    static UInt32 s_promptCrosshairRefHandle = 0;
+    static UInt32 s_lastPromptActivationTargetID = 0;
+    static bool s_lastPromptActivationWasSynthetic = false;
+    static std::chrono::steady_clock::time_point s_lastPromptActivationTime{};
+
+    static bool IsRecentPromptActivation(UInt32 targetID, bool synthetic)
+    {
+        if (targetID == 0 || s_lastPromptActivationTargetID != targetID ||
+            s_lastPromptActivationWasSynthetic != synthetic)
+            return false;
+
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - s_lastPromptActivationTime).count();
+        return elapsed >= 0 && elapsed <= 200;
+    }
+
+    static void RecordPromptActivation(UInt32 targetID, bool synthetic)
+    {
+        s_lastPromptActivationTargetID = targetID;
+        s_lastPromptActivationWasSynthetic = synthetic;
+        s_lastPromptActivationTime = std::chrono::steady_clock::now();
+    }
+
+    class PromptCrosshairEventHandler : public BSTEventSink<SKSECrosshairRefEvent>
+    {
+    public:
+        virtual EventResult ReceiveEvent(
+            SKSECrosshairRefEvent* evn,
+            EventDispatcher<SKSECrosshairRefEvent>* /*dispatcher*/) override
+        {
+            s_promptCrosshairRefHandle =
+                (evn && evn->crosshairRef) ? evn->crosshairRef->CreateRefHandle() : 0;
+            return kEvent_Continue;
+        }
+
+        static PromptCrosshairEventHandler* GetSingleton()
+        {
+            static PromptCrosshairEventHandler instance;
+            return MakeSkyrimEventSinkCompatible(&instance);
+        }
+    };
 
     typedef void (*_EquipManager_EquipItem)(::EquipManager*, Actor*, TESForm*, BaseExtraList*, SInt32, BGSEquipSlot*, bool, bool, bool, void*);
     _EquipManager_EquipItem OriginalEquipItem = nullptr;
@@ -217,7 +262,7 @@ return false;
         
       if (activatee == droppedLeft || activatee == droppedRight)
         {
- return true;  // Block - this weapon is managed by our trigger system
+  return true;  // Block - this weapon is managed by our trigger system
    }
         
     // Check if EITHER hand has a weapon equipped (legacy check)
@@ -242,6 +287,24 @@ return false;
         {
             return OriginalActivate(activatee, activator, unk01, unk02, count, defaultProcessingOnly);
         }
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (player && activator == player && activatee && activatee != player &&
+            activatee->baseForm && activatee->baseForm->formType != kFormType_Weapon)
+        {
+            // The raw VR binding may deliver its normal activation just after
+            // our owner-grip fallback.  Suppress only that same-target duplicate
+            // in a very short window so doors and other toggles do not fire twice.
+            if (IsRecentPromptActivation(activatee->formID, true))
+            {
+                _MESSAGE(
+                    "[FalseEdgeVR] Suppressed duplicate native prompt activation: target=0x%08X",
+                    activatee->formID);
+                return false;
+            }
+
+            RecordPromptActivation(activatee->formID, false);
+        }
   
         // Log all weapon activations for debugging
         if (activatee && activatee->baseForm && activatee->baseForm->formType == kFormType_Weapon)
@@ -258,7 +321,7 @@ return false;
     return false;  // Block activation
       }
 
-        PlayerCharacter* player = *g_thePlayer;
+        player = *g_thePlayer;
         if (player && activator == player && activatee && activatee->baseForm &&
             activatee->baseForm->formType == kFormType_Door && !g_bypassActivateBlock)
         {
@@ -315,6 +378,79 @@ return false;
         
      return result;
 }
+
+    void RegisterPromptActivationSupport(SKSEMessagingInterface* messaging)
+    {
+        if (!messaging || !messaging->GetEventDispatcher)
+        {
+            _ERROR("[FalseEdgeVR] Prompt target tracking unavailable: SKSE messaging dispatcher missing");
+            return;
+        }
+
+        auto* dispatcher = static_cast<EventDispatcher<SKSECrosshairRefEvent>*>(
+            messaging->GetEventDispatcher(SKSEMessagingInterface::kDispatcher_CrosshairEvent));
+        if (!dispatcher)
+        {
+            _ERROR("[FalseEdgeVR] Prompt target tracking unavailable: crosshair dispatcher missing");
+            return;
+        }
+
+        dispatcher->AddEventSink(PromptCrosshairEventHandler::GetSingleton());
+        _MESSAGE("[FalseEdgeVR] Registered SKSE crosshair target tracker for grip prompt activation");
+    }
+
+    bool TryActivateTrackedPrompt(const char* sourceLabel)
+    {
+        if (!sourceLabel)
+            sourceLabel = "grip";
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player || !OriginalActivate || s_promptCrosshairRefHandle == 0)
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Grip prompt activation skipped (%s): no tracked target",
+                sourceLabel);
+            return false;
+        }
+
+        UInt32 handle = s_promptCrosshairRefHandle;
+        NiPointer<TESObjectREFR> target;
+        if (!LookupREFRByHandle(handle, target) || !target || target.m_pObject == player ||
+            !target->baseForm || target->baseForm->formType == kFormType_Weapon)
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Grip prompt activation skipped (%s): target unavailable or weapon",
+                sourceLabel);
+            return false;
+        }
+
+        if (IsRecentPromptActivation(target->formID, false))
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Native prompt activation already handled %s: target=0x%08X",
+                sourceLabel, target->formID);
+            return true;
+        }
+
+        if (target->baseForm->formType == kFormType_Door)
+            NotifyDoorOrTransitionActivated();
+
+        RecordPromptActivation(target->formID, true);
+        const bool result = SafeActivate(target.m_pObject, player, 0, 0, 1, false);
+        if (!result)
+        {
+            s_lastPromptActivationTargetID = 0;
+            s_lastPromptActivationWasSynthetic = false;
+        }
+
+        _MESSAGE(
+            "[FalseEdgeVR] Grip prompt activation (%s): target=0x%08X base=0x%08X result=%d",
+            sourceLabel,
+            target->formID,
+            target->baseForm->formID,
+            result ? 1 : 0);
+        return result;
+    }
     
     // ============================================
     // Hook Setup

@@ -63,13 +63,8 @@ namespace BarebonesVR
 
 		bool s_internalEquipInProgress = false;
 
-		bool s_hasHiggsEquipIntent = false;
-		bool s_higgsEquipIntentIsLeftVR = false;
-		std::chrono::steady_clock::time_point s_higgsEquipIntentTime{};
-
 		constexpr int kSpellwheelActivityWindowMs = 5000;
 		constexpr int kHandIntentWindowMs = 2500;
-		constexpr int kHiggsEquipIntentMaxAgeMs = 2500;
 
 		bool s_offhandTriggerWasDown = false;
 		bool s_manualOffhandConcentrationCasting = false;
@@ -324,58 +319,6 @@ namespace BarebonesVR
 			return true;
 		}
 
-		void RecordHiggsEquipIntent(bool isLeftVRController)
-		{
-			s_hasHiggsEquipIntent = true;
-			s_higgsEquipIntentIsLeftVR = isLeftVRController;
-			s_higgsEquipIntentTime = std::chrono::steady_clock::now();
-		}
-
-		void ClearHiggsEquipIntent()
-		{
-			s_hasHiggsEquipIntent = false;
-		}
-
-		bool TryGetHiggsIntentGameHandLeft(bool& outIsLeftGameHand)
-		{
-			bool leftTrigger = false;
-			bool rightTrigger = false;
-			GetControllerTrigger(true, leftTrigger);
-			GetControllerTrigger(false, rightTrigger);
-
-			if (leftTrigger && !rightTrigger)
-			{
-				outIsLeftGameHand = VRControllerToGameHand(true);
-				ClearHiggsEquipIntent();
-				return true;
-			}
-
-			if (rightTrigger && !leftTrigger)
-			{
-				outIsLeftGameHand = VRControllerToGameHand(false);
-				ClearHiggsEquipIntent();
-				return true;
-			}
-
-			if (!s_hasHiggsEquipIntent)
-			{
-				return false;
-			}
-
-			const auto ageMs = std::chrono::duration_cast<std::chrono::milliseconds>(
-				std::chrono::steady_clock::now() - s_higgsEquipIntentTime).count();
-
-			if (ageMs > kHiggsEquipIntentMaxAgeMs)
-			{
-				ClearHiggsEquipIntent();
-				return false;
-			}
-
-			outIsLeftGameHand = VRControllerToGameHand(s_higgsEquipIntentIsLeftVR);
-			ClearHiggsEquipIntent();
-			return true;
-		}
-
 		UInt8 OneHandedAnimTypeFor(UInt8 twoHandedType)
 		{
 			switch (twoHandedType)
@@ -568,7 +511,6 @@ namespace BarebonesVR
 			RestoreVanillaTwoHandWeaponForm(weapon);
 			s_swappedWeapons.erase(weapon->formID);
 			ClearSpellwheelHandIntent();
-			ClearHiggsEquipIntent();
 
 			_MESSAGE(
 				"BarebonesVR: Restored vanilla records for unequipped 2H weapon 0x%08X (animType=%u, eitherHand=0)",
@@ -597,7 +539,6 @@ namespace BarebonesVR
 					{
 						RestoreVanillaTwoHandWeaponForm(weapon);
 						ClearSpellwheelHandIntent();
-						ClearHiggsEquipIntent();
 						_MESSAGE(
 							"BarebonesVR: Restored vanilla records for unequipped 2H weapon 0x%08X (prune, animType=%u, eitherHand=0)",
 							weapon->formID,
@@ -1469,10 +1410,8 @@ namespace BarebonesVR
 				weapon->equipType.SetEquipSlot(eitherHand);
 			}
 
-			RecordHiggsEquipIntent(isLeft);
-
 			_MESSAGE(
-				"BarebonesVR: HIGGS grab recorded 2H equip intent for weapon 0x%08X (%s VR controller)",
+				"BarebonesVR: HIGGS grip transfer suppressed for 2H weapon 0x%08X (%s VR controller); grip input preserved",
 				weapon->formID,
 				isLeft ? "left" : "right");
 		}
@@ -1700,22 +1639,6 @@ namespace BarebonesVR
 						weaponInMainHand,
 						weaponInOffHand,
 						"SpellWheel main-hand initiated");
-				}
-				else
-				{
-					bool higgsIntentIsLeftGameHand = false;
-					if (TryGetHiggsIntentGameHandLeft(higgsIntentIsLeftGameHand))
-					{
-						const bool targetIsMainHand = (higgsIntentIsLeftGameHand == mainHandIsLeftGameHand);
-						RouteTwoHandEquipToHand(
-							player,
-							item,
-							higgsIntentIsLeftGameHand,
-							targetIsMainHand,
-							weaponInMainHand,
-							weaponInOffHand,
-							"HIGGS grab initiated");
-					}
 				}
 
 				return kEvent_Continue;

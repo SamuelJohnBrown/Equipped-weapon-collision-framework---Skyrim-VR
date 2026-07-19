@@ -5,6 +5,7 @@
 #include "skse64/GameReferences.h"
 #include "skse64/GameMenus.h"
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 
 namespace FalseEdgeVR
@@ -91,6 +92,143 @@ namespace FalseEdgeVR
     static bool s_rightGripPressed = false;
     static bool s_leftGripWasPressed = false;
     static bool s_rightGripWasPressed = false;
+
+    // Temporary collision -> equipped transition driven by the support hand's
+    // grip.  Fake Edge keeps the original game hand authoritative throughout;
+    // the opposite controller is only the support hand and never becomes the
+    // owner of the weapon.
+    static constexpr float kOppositeGripMaxControllerDistance = 42.0f;
+    struct OppositeGrip2HTransitionState
+    {
+        bool active = false;
+        bool ownerGameHandIsLeft = false;
+        bool supportVRControllerIsLeft = false;
+        bool equipQueued = false;
+        bool equippedObserved = false;
+        bool gripObservedHeld = false;
+        bool higgsGripSettingSuppressed = false;
+        bool higgsGripRearmSucceeded = false;
+        bool higgsGripRearmFailureLogged = false;
+        bool higgsSupportHandDisabled = false;
+        bool twoHandGrabValidated = false;
+        bool ownerGripWasHeld = false;
+        bool nativeWeaponSoundsMuted = false;
+        int recoveryRetryCount = 0;
+        int wrongHandCorrectionCount = 0;
+        int higgsGripRearmAttemptCount = 0;
+        UInt32 weaponFormID = 0;
+        UInt32 collisionRefID = 0;
+        float equipWaitTimer = 0.0f;
+        float equippedSettleTimer = 0.0f;
+        float higgsGripRearmTimer = 0.0f;
+        float higgsGripLastAttemptTime = 0.0f;
+        float armGraceTimer = 0.0f;
+        float validationGraceTimer = 0.0f;
+        float recoveryRetryTimer = 0.0f;
+        float wrongHandCorrectionTimer = 0.0f;
+        float supportLostTimer = 0.0f;
+        double savedHiggsEnableGrip = 1.0;
+        BGSSoundDescriptorForm* savedNativePickUpSound = nullptr;
+        BGSSoundDescriptorForm* savedNativePutDownSound = nullptr;
+    };
+
+    static OppositeGrip2HTransitionState s_oppositeGrip2H;
+
+    // HIGGS completes GrabObject on a later physics update.  When the support
+    // grip is released, that delayed grab belongs to the newly recreated
+    // collision object and can occur just after the transition state resets.
+    // Keep only HIGGS physics audio muted through that short completion tail.
+    static constexpr ULONGLONG kOppositeGripReleaseSoundTailMs = 1000;
+    static std::atomic<ULONGLONG> s_oppositeGripReleaseSoundSuppressUntilMs{ 0 };
+
+    static bool TryGetVRControllerSeparation(
+        bool firstVRControllerIsLeft, bool secondVRControllerIsLeft,
+        float& outDistance)
+    {
+        outDistance = 9999.0f;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        NiNode* rootNode = player->GetNiNode();
+        if (!rootNode)
+            rootNode = player->GetNiRootNode(0);
+        if (!rootNode)
+            rootNode = player->GetNiRootNode(1);
+        if (!rootNode)
+            return false;
+
+        BSFixedString leftHandName("NPC L Hand [LHnd]");
+        BSFixedString rightHandName("NPC R Hand [RHnd]");
+        NiAVObject* leftHandNode = rootNode->GetObjectByName(&leftHandName.data);
+        NiAVObject* rightHandNode = rootNode->GetObjectByName(&rightHandName.data);
+        if (!leftHandNode || !rightHandNode)
+            return false;
+
+        NiAVObject* firstNode = firstVRControllerIsLeft ? leftHandNode : rightHandNode;
+        NiAVObject* secondNode = secondVRControllerIsLeft ? leftHandNode : rightHandNode;
+        const NiPoint3& firstPos = firstNode->m_worldTransform.pos;
+        const NiPoint3& secondPos = secondNode->m_worldTransform.pos;
+        const float dx = firstPos.x - secondPos.x;
+        const float dy = firstPos.y - secondPos.y;
+        const float dz = firstPos.z - secondPos.z;
+        outDistance = sqrt(dx * dx + dy * dy + dz * dz);
+        return true;
+    }
+
+    static bool BothHiggsHandsHoldTransitionReference(
+        const OppositeGrip2HTransitionState& state)
+    {
+        if (!higgsInterface || state.collisionRefID == 0)
+            return false;
+
+        const bool ownerVRControllerIsLeft =
+            GameHandToVRController(state.ownerGameHandIsLeft);
+        TESObjectREFR* ownerHeld =
+            higgsInterface->GetGrabbedObject(ownerVRControllerIsLeft);
+        TESObjectREFR* supportHeld =
+            higgsInterface->GetGrabbedObject(state.supportVRControllerIsLeft);
+
+        if (!ownerHeld || !supportHeld)
+            return false;
+
+        return ownerHeld == supportHeld &&
+            ownerHeld->formID == state.collisionRefID &&
+            ownerHeld->baseForm &&
+            ownerHeld->baseForm->formID == state.weaponFormID;
+    }
+
+    static void ResetOppositeGrip2HTransition()
+    {
+        // Never leave HIGGS grip handling disabled if the transition is
+        // interrupted by a menu, load, death, or external equipment change.
+        if (s_oppositeGrip2H.higgsGripSettingSuppressed && higgsInterface)
+        {
+            higgsInterface->SetSettingDouble(
+                "EnableGrip", s_oppositeGrip2H.savedHiggsEnableGrip);
+        }
+        if (s_oppositeGrip2H.higgsSupportHandDisabled && higgsInterface)
+        {
+            higgsInterface->EnableHand(
+                s_oppositeGrip2H.supportVRControllerIsLeft);
+        }
+        if (s_oppositeGrip2H.nativeWeaponSoundsMuted &&
+            s_oppositeGrip2H.weaponFormID != 0)
+        {
+            TESForm* form = LookupFormByID(s_oppositeGrip2H.weaponFormID);
+            TESObjectWEAP* weapon = form ?
+                DYNAMIC_CAST(form, TESForm, TESObjectWEAP) : nullptr;
+            if (weapon)
+            {
+                weapon->pickupSounds.pickUp =
+                    s_oppositeGrip2H.savedNativePickUpSound;
+                weapon->pickupSounds.putDown =
+                    s_oppositeGrip2H.savedNativePutDownSound;
+            }
+        }
+        s_oppositeGrip2H = OppositeGrip2HTransitionState();
+    }
 
     // ============================================
     // Drop Protection Override (Grip Spam Detection)
@@ -635,6 +773,33 @@ namespace FalseEdgeVR
         if (!player)
             return false;
 
+        // Opposite-grip conversion must not SafeActivate the shared HIGGS
+        // world reference.  SafeActivate attributes the pickup to whichever
+        // physical hand most recently grabbed it, which can equip the 2H
+        // weapon in the support hand and orphan the original-hand tracking.
+        // Recover the world copy to inventory first, then explicitly equip it
+        // on the game thread to the authoritative owner hand.
+        if (forceEquip && s_oppositeGrip2H.active)
+        {
+            TESForm* weaponForm = droppedWeapon->baseForm;
+            if (!weaponForm || weaponForm->formID != s_oppositeGrip2H.weaponFormID)
+                return false;
+
+            if (higgsInterface && !s_oppositeGrip2H.higgsSupportHandDisabled)
+            {
+                higgsInterface->DisableHand(
+                    s_oppositeGrip2H.supportVRControllerIsLeft);
+                s_oppositeGrip2H.higgsSupportHandDisabled = true;
+            }
+
+            if (!equipMgr->PickUpGrabbedWeaponBeforeEquip(isLeftGameHand, false))
+                return false;
+
+            equipMgr->ScheduleEquipWeaponToGameHand(
+                weaponForm->formID, isLeftGameHand);
+            return true;
+        }
+
         const bool wasDualWieldingSame = equipMgr->WasDualWieldingSameWeapon(isLeftGameHand);
         if (wasDualWieldingSame)
         {
@@ -651,6 +816,454 @@ namespace FalseEdgeVR
         equipMgr->ClearPendingReequip(isLeftGameHand);
         equipMgr->ScheduleForceReequip(isLeftGameHand);
         return true;
+    }
+
+    static void UpdateOppositeGrip2HTransition(float deltaTime)
+    {
+        OppositeGrip2HTransitionState& state = s_oppositeGrip2H;
+        if (!state.active)
+            return;
+
+        const bool rawSupportGripHeld = state.supportVRControllerIsLeft ?
+            s_leftGripPressed : s_rightGripPressed;
+        const bool higgsSupportHold = higgsInterface &&
+            higgsInterface->IsHoldingObject(state.supportVRControllerIsLeft);
+        const bool supportGripHeld = rawSupportGripHeld || higgsSupportHold;
+
+        const bool ownerVRControllerIsLeft =
+            GameHandToVRController(state.ownerGameHandIsLeft);
+        const bool rawOwnerGripHeld = ownerVRControllerIsLeft ?
+            s_leftGripPressed : s_rightGripPressed;
+
+        // Once the support grip has produced an active weapon, a new press of
+        // the original/owner grip is reserved for Skyrim's current interaction
+        // prompt.  The support grip remains authoritative for combat mode.
+        if (state.equippedObserved && rawOwnerGripHeld && !state.ownerGripWasHeld)
+        {
+            TryActivateTrackedPrompt("opposite-grip owner hand");
+        }
+        state.ownerGripWasHeld = rawOwnerGripHeld;
+
+        if (supportGripHeld)
+        {
+            state.gripObservedHeld = true;
+            state.supportLostTimer = 0.0f;
+        }
+
+        // HIGGS normally requires a fresh grip rising edge to grab an equipped
+        // weapon.  Because the player is deliberately continuing the same
+        // physical hold across this conversion, briefly suppress HIGGS's own
+        // EnableGrip setting and then restore it.  That creates an internal
+        // falling/rising edge without consuming or changing the game's raw
+        // controller input.
+        if (state.higgsGripSettingSuppressed)
+        {
+            state.higgsGripRearmTimer += deltaTime;
+            if (state.higgsGripRearmTimer >= 0.10f)
+            {
+                if (higgsInterface)
+                {
+                    higgsInterface->SetSettingDouble(
+                        "EnableGrip", state.savedHiggsEnableGrip);
+                }
+                state.higgsGripSettingSuppressed = false;
+                _MESSAGE(
+                    "[FalseEdgeVR] Re-armed HIGGS support grip after 2H equip: "
+                    "form=0x%08X support-controller=%s attempt=%d/3",
+                    state.weaponFormID,
+                    state.supportVRControllerIsLeft ? "LEFT" : "RIGHT",
+                    state.higgsGripRearmAttemptCount);
+            }
+        }
+
+        // Wait until the next input poll after HIGGS reports the second grab.
+        // This lets HIGGS establish its physical support grip before the world
+        // reference is activated and converted back into an equipped weapon.
+        if (!state.equipQueued)
+        {
+            // The grabbed callback can precede both OpenVR's cached button
+            // update and HIGGS's holding-state update by a physics tick.  Do
+            // not interpret that short gap as a release.
+            if (!supportGripHeld)
+            {
+                state.armGraceTimer += deltaTime;
+                if (state.armGraceTimer < 0.25f)
+                    return;
+
+                _MESSAGE(
+                    "[FalseEdgeVR] Opposite-grip 2H transition cancelled before equip: "
+                    "form=0x%08X owner-game-hand=%s raw-grip=%d higgs-hold=%d",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                    rawSupportGripHeld ? 1 : 0,
+                    higgsSupportHold ? 1 : 0);
+                ResetOppositeGrip2HTransition();
+                return;
+            }
+
+            state.armGraceTimer = 0.0f;
+
+            // A HIGGS grab callback alone is not sufficient: stale callbacks
+            // can be emitted when the support controller is nowhere near the
+            // weapon.  Before any inventory/world mutation, require both HIGGS
+            // hands to resolve to this exact live reference and require the two
+            // physical controller nodes to be close together.
+            if (!state.twoHandGrabValidated)
+            {
+                const bool ownerVRControllerIsLeft =
+                    GameHandToVRController(state.ownerGameHandIsLeft);
+                float controllerDistance = 9999.0f;
+                const bool haveControllerDistance = TryGetVRControllerSeparation(
+                    ownerVRControllerIsLeft,
+                    state.supportVRControllerIsLeft,
+                    controllerDistance);
+                const bool bothHandsHoldSameRef =
+                    BothHiggsHandsHoldTransitionReference(state);
+
+                if (!haveControllerDistance ||
+                    controllerDistance > kOppositeGripMaxControllerDistance ||
+                    !bothHandsHoldSameRef)
+                {
+                    state.validationGraceTimer += deltaTime;
+                    if (state.validationGraceTimer < 0.50f)
+                        return;
+
+                    _MESSAGE(
+                        "[FalseEdgeVR] Rejected unsafe 2H conversion before mutation: "
+                        "form=0x%08X controller-distance=%.2f distance-valid=%d "
+                        "both-hands-same-ref=%d",
+                        state.weaponFormID,
+                        controllerDistance,
+                        haveControllerDistance ? 1 : 0,
+                        bothHandsHoldSameRef ? 1 : 0);
+                    ResetOppositeGrip2HTransition();
+                    return;
+                }
+
+                state.twoHandGrabValidated = true;
+                state.validationGraceTimer = 0.0f;
+                _MESSAGE(
+                    "[FalseEdgeVR] Validated close two-hand collision grip: "
+                    "form=0x%08X controller-distance=%.2f",
+                    state.weaponFormID, controllerDistance);
+            }
+
+            if (state.recoveryRetryTimer > 0.0f)
+            {
+                state.recoveryRetryTimer -= deltaTime;
+                return;
+            }
+
+            if (!EquipGrabbedWeaponForGameHand(state.ownerGameHandIsLeft, true))
+            {
+                state.recoveryRetryCount++;
+                if (state.recoveryRetryCount <= 10)
+                {
+                    state.recoveryRetryTimer = 0.03f;
+                    _MESSAGE(
+                        "[FalseEdgeVR] Opposite-grip recovery deferred; retrying: "
+                        "form=0x%08X owner-game-hand=%s attempt=%d/10",
+                        state.weaponFormID,
+                        state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                        state.recoveryRetryCount);
+                    return;
+                }
+
+                _MESSAGE(
+                    "[FalseEdgeVR] Opposite-grip 2H equip failed: form=0x%08X "
+                    "owner-game-hand=%s",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT");
+                ResetOppositeGrip2HTransition();
+                return;
+            }
+
+            state.equipQueued = true;
+            state.equipWaitTimer = 0.0f;
+            _MESSAGE(
+                "[FalseEdgeVR] Opposite grip activating 2H weapon in original hand: "
+                "form=0x%08X owner-game-hand=%s support-controller=%s "
+                "raw-grip=%d higgs-hold=%d",
+                state.weaponFormID,
+                state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                state.supportVRControllerIsLeft ? "LEFT" : "RIGHT",
+                rawSupportGripHeld ? 1 : 0,
+                higgsSupportHold ? 1 : 0);
+            return;
+        }
+
+        PlayerCharacter* player = *g_thePlayer;
+        TESForm* equipped = player ?
+            player->GetEquippedObject(state.ownerGameHandIsLeft) : nullptr;
+        bool matchingWeaponEquipped =
+            equipped && equipped->formID == state.weaponFormID &&
+            EquipManager::IsWeapon(equipped);
+
+        // 2H Weapons Unlocked can expose the worn hand more reliably through
+        // the inventory worn lists than through GetEquippedObject().
+        TESForm* transitionWeapon = LookupFormByID(state.weaponFormID);
+        bool wornLeft = false;
+        bool wornRight = false;
+        if (player && transitionWeapon)
+        {
+            EquipManager::Get2HWeaponWornGameHands(
+                player, transitionWeapon, wornLeft, wornRight);
+            matchingWeaponEquipped = matchingWeaponEquipped ||
+                (state.ownerGameHandIsLeft ? wornLeft : wornRight);
+        }
+
+        const bool desiredHandWorn =
+            state.ownerGameHandIsLeft ? wornLeft : wornRight;
+        const bool wrongHandWorn =
+            state.ownerGameHandIsLeft ? wornRight : wornLeft;
+
+        // 2hWeaponsUnlocked can briefly honor the support hand's queued HIGGS
+        // grab after our explicit original-hand equip request.  Keep the
+        // transition weapon protected from Fake Edge's normal auto-holster,
+        // remove only that incorrect worn slot, and retry the authoritative
+        // original-hand equip while the HIGGS support hand remains disabled.
+        if (!matchingWeaponEquipped && wrongHandWorn && !desiredHandWorn &&
+            !state.equippedObserved)
+        {
+            state.wrongHandCorrectionTimer += deltaTime;
+            if (state.wrongHandCorrectionTimer >= 0.0f &&
+                state.wrongHandCorrectionCount < 3)
+            {
+                EquipManager* equipMgr = EquipManager::GetSingleton();
+                const bool wrongHandIsLeft = !state.ownerGameHandIsLeft;
+                const bool wrongHandUnequipped =
+                    equipMgr->FullUnequipHand(wrongHandIsLeft);
+                equipMgr->ScheduleEquipWeaponToGameHand(
+                    state.weaponFormID, state.ownerGameHandIsLeft);
+                state.wrongHandCorrectionCount++;
+                state.wrongHandCorrectionTimer = 0.0f;
+                state.equipWaitTimer = 0.0f;
+
+                _MESSAGE(
+                    "[FalseEdgeVR] Correcting 2H support-hand equip: "
+                    "form=0x%08X wrong-hand=%s original-hand=%s "
+                    "unequipped=%d attempt=%d/3",
+                    state.weaponFormID,
+                    wrongHandIsLeft ? "LEFT" : "RIGHT",
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                    wrongHandUnequipped ? 1 : 0,
+                    state.wrongHandCorrectionCount);
+                return;
+            }
+        }
+        else
+        {
+            state.wrongHandCorrectionTimer = 0.0f;
+        }
+
+        if (matchingWeaponEquipped)
+        {
+            // The bundled 2H add-on no longer treats a HIGGS support grab as a
+            // hand-transfer request, so support re-arming is now symmetric.
+            if (state.higgsSupportHandDisabled && higgsInterface)
+            {
+                higgsInterface->EnableHand(state.supportVRControllerIsLeft);
+                state.higgsSupportHandDisabled = false;
+                _MESSAGE(
+                    "[FalseEdgeVR] Re-enabled HIGGS support hand after original-hand 2H equip: "
+                    "form=0x%08X support-controller=%s",
+                    state.weaponFormID,
+                    state.supportVRControllerIsLeft ? "LEFT" : "RIGHT");
+            }
+            if (!state.equippedObserved)
+            {
+                _MESSAGE(
+                    "[FalseEdgeVR] Opposite-grip 2H weapon active: form=0x%08X "
+                    "owner-game-hand=%s (held until support grip release)",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT");
+            }
+            state.equippedObserved = true;
+            state.equipWaitTimer = 0.0f;
+            state.equippedSettleTimer += deltaTime;
+
+            // Do not assume the synthetic falling/rising edge worked.  HIGGS
+            // exposes its actual two-hand state, so verify it and retry after
+            // the weapon geometry has had more time to settle if necessary.
+            if (higgsInterface && higgsInterface->IsTwoHanding())
+            {
+                if (!state.higgsGripRearmSucceeded)
+                {
+                    state.higgsGripRearmSucceeded = true;
+                    _MESSAGE(
+                        "[FalseEdgeVR] HIGGS support grip verified on active 2H weapon: "
+                        "form=0x%08X owner-game-hand=%s support-controller=%s "
+                        "attempt=%d",
+                        state.weaponFormID,
+                        state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                        state.supportVRControllerIsLeft ? "LEFT" : "RIGHT",
+                        state.higgsGripRearmAttemptCount);
+                }
+            }
+
+            const bool firstRearmReady =
+                state.higgsGripRearmAttemptCount == 0 &&
+                state.equippedSettleTimer >= 0.12f;
+            const bool retryRearmReady =
+                state.higgsGripRearmAttemptCount > 0 &&
+                state.equippedSettleTimer - state.higgsGripLastAttemptTime >= 0.35f;
+            if (state.gripObservedHeld &&
+                !state.higgsGripRearmSucceeded &&
+                !state.higgsGripSettingSuppressed &&
+                state.higgsGripRearmAttemptCount < 3 &&
+                (firstRearmReady || retryRearmReady))
+            {
+                state.higgsGripRearmAttemptCount++;
+                state.higgsGripLastAttemptTime = state.equippedSettleTimer;
+
+                if (higgsInterface && !higgsInterface->IsTwoHanding())
+                {
+                    double enableGrip = 1.0;
+                    if (higgsInterface->GetSettingDouble("EnableGrip", enableGrip) &&
+                        enableGrip > 0.5 &&
+                        higgsInterface->SetSettingDouble("EnableGrip", 0.0))
+                    {
+                        state.savedHiggsEnableGrip = enableGrip;
+                        state.higgsGripSettingSuppressed = true;
+                        state.higgsGripRearmTimer = 0.0f;
+                        _MESSAGE(
+                            "[FalseEdgeVR] Pulsing HIGGS support-grip detection: "
+                            "form=0x%08X support-controller=%s attempt=%d/3 "
+                            "(raw input unchanged)",
+                            state.weaponFormID,
+                            state.supportVRControllerIsLeft ? "LEFT" : "RIGHT",
+                            state.higgsGripRearmAttemptCount);
+                    }
+                    else
+                    {
+                        _MESSAGE(
+                            "[FalseEdgeVR] HIGGS support-grip re-arm unavailable: "
+                            "form=0x%08X",
+                            state.weaponFormID);
+                    }
+                }
+            }
+
+            if (!state.higgsGripRearmSucceeded &&
+                !state.higgsGripRearmFailureLogged &&
+                state.higgsGripRearmAttemptCount >= 3 &&
+                !state.higgsGripSettingSuppressed &&
+                state.equippedSettleTimer - state.higgsGripLastAttemptTime >= 0.35f)
+            {
+                state.higgsGripRearmFailureLogged = true;
+                _MESSAGE(
+                    "[FalseEdgeVR] HIGGS support grip could not be verified after 3 attempts: "
+                    "form=0x%08X owner-game-hand=%s support-controller=%s "
+                    "raw-grip=%d can-grab=%d",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                    state.supportVRControllerIsLeft ? "LEFT" : "RIGHT",
+                    rawSupportGripHeld ? 1 : 0,
+                    higgsInterface &&
+                        higgsInterface->CanGrabObject(state.supportVRControllerIsLeft) ? 1 : 0);
+            }
+        }
+        else if (state.equippedObserved)
+        {
+            // An external equip/unequip won the race.  Do not later holster an
+            // unrelated weapon merely because the old support grip changed.
+            _MESSAGE(
+                "[FalseEdgeVR] Opposite-grip 2H state ended after external equipment change: "
+                "form=0x%08X owner-game-hand=%s",
+                state.weaponFormID,
+                state.ownerGameHandIsLeft ? "LEFT" : "RIGHT");
+            ResetOppositeGrip2HTransition();
+            return;
+        }
+        else
+        {
+            state.equipWaitTimer += deltaTime;
+            if (state.equipWaitTimer >= 2.0f)
+            {
+                _MESSAGE(
+                    "[FalseEdgeVR] Opposite-grip 2H equip timed out: form=0x%08X "
+                    "owner-game-hand=%s",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT");
+                ResetOppositeGrip2HTransition();
+            }
+            return;
+        }
+
+        // Recovering the collision reference briefly makes HIGGS report that
+        // neither hand holds it.  Give the support hand time to attach to the
+        // newly equipped weapon before treating loss of both raw grip and the
+        // HIGGS hold as a genuine release.
+        if (!supportGripHeld && state.gripObservedHeld)
+        {
+            state.supportLostTimer += deltaTime;
+            if (state.supportLostTimer < 0.35f)
+                return;
+
+            EquipManager* equipMgr = EquipManager::GetSingleton();
+            if (equipMgr->ForceUnequipAndGrab(state.ownerGameHandIsLeft))
+            {
+                s_oppositeGripReleaseSoundSuppressUntilMs.store(
+                    GetTickCount64() + kOppositeGripReleaseSoundTailMs,
+                    std::memory_order_release);
+                _MESSAGE(
+                    "[FalseEdgeVR] Opposite grip released; restored 2H collision weapon: "
+                    "form=0x%08X owner-game-hand=%s "
+                    "(HIGGS audio tail suppressed %llu ms)",
+                    state.weaponFormID,
+                    state.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                    kOppositeGripReleaseSoundTailMs);
+                ResetOppositeGrip2HTransition();
+            }
+        }
+    }
+
+    static bool ControllerTriggerHoldsEquippedWeapon(bool isLeftVRController)
+    {
+        const bool triggerHeld = isLeftVRController ?
+            s_leftTriggerPressed : s_rightTriggerPressed;
+        if (!triggerHeld)
+            return false;
+
+        PlayerCharacter* player = *g_thePlayer;
+        if (!player)
+            return false;
+
+        const bool isLeftGameHand = VRControllerToGameHand(isLeftVRController);
+        TESForm* equipped = player->GetEquippedObject(isLeftGameHand);
+        if (equipped && EquipManager::IsWeapon(equipped))
+            return true;
+
+        const PlayerEquipState& equipState =
+            EquipManager::GetSingleton()->GetEquipState();
+        return isLeftGameHand ?
+            equipState.leftHand.isEquipped : equipState.rightHand.isEquipped;
+    }
+
+    static void UpdateTriggerHeldPromptActivation()
+    {
+        // Opposite-grip mode has its own owner-hand prompt edge.  This path is
+        // specifically for the mod's ordinary "hold trigger to equip" mode.
+        if (s_oppositeGrip2H.active)
+            return;
+
+        const bool leftGripJustPressed =
+            s_leftGripPressed && !s_leftGripWasPressed;
+        const bool rightGripJustPressed =
+            s_rightGripPressed && !s_rightGripWasPressed;
+        if (!leftGripJustPressed && !rightGripJustPressed)
+            return;
+
+        if (!ControllerTriggerHoldsEquippedWeapon(true) &&
+            !ControllerTriggerHoldsEquippedWeapon(false))
+            return;
+
+        const char* sourceLabel = leftGripJustPressed && rightGripJustPressed ?
+            "trigger-held mode, both grips" :
+            (leftGripJustPressed ?
+                "trigger-held mode, left grip" :
+                "trigger-held mode, right grip");
+        TryActivateTrackedPrompt(sourceLabel);
     }
 
     static void ForceEquipAllGrabbedWeapons()
@@ -1038,6 +1651,32 @@ namespace FalseEdgeVR
 
     // Grip button mask (k_EButton_Grip = 2)
     static const uint64_t GRIP_BUTTON_MASK = (1ull << 2);
+    // Oculus/OpenComposite commonly exposes the analog hand trigger as Axis2
+    // instead of setting the legacy digital Grip bit.
+    static const uint64_t GRIP_AXIS2_BUTTON_MASK = (1ull << 34);
+    static const float GRIP_ANALOG_PRESS_THRESHOLD = 0.50f;
+
+    static bool IsRawControllerGripDownNow(bool isLeftVRController)
+    {
+        BSOpenVR* openVR = (*g_openVR);
+        if (!openVR || !openVR->vrSystem)
+            return false;
+
+        vr_1_0_12::IVRSystem* vrSystem = openVR->vrSystem;
+        const vr_1_0_12::ETrackedControllerRole role = isLeftVRController ?
+            vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_LeftHand :
+            vr_1_0_12::ETrackedControllerRole::TrackedControllerRole_RightHand;
+        const vr_1_0_12::TrackedDeviceIndex_t controller =
+            vrSystem->GetTrackedDeviceIndexForControllerRole(role);
+
+        vr_1_0_12::VRControllerState_t state;
+        if (!vrSystem->GetControllerState(controller, &state, sizeof(state)))
+            return false;
+
+        return (state.ulButtonPressed & GRIP_BUTTON_MASK) != 0 ||
+            (state.ulButtonPressed & GRIP_AXIS2_BUTTON_MASK) != 0 ||
+            state.rAxis[2].x > GRIP_ANALOG_PRESS_THRESHOLD;
+    }
 
     // Track player draw/sheathe for weapons that stay equipped (SKSE action events often miss in VR)
     static bool s_prevPlayerWeaponDrawn = false;
@@ -1233,6 +1872,83 @@ namespace FalseEdgeVR
         return higgsInterface->IsTwoHanding();
     }
 
+    bool VRInputHandler::IsOppositeGrip2HActiveForGameHand(bool isLeftGameHand, UInt32 weaponFormID)
+    {
+        return s_oppositeGrip2H.active &&
+            s_oppositeGrip2H.ownerGameHandIsLeft == isLeftGameHand &&
+            (weaponFormID == 0 || s_oppositeGrip2H.weaponFormID == weaponFormID);
+    }
+
+    bool VRInputHandler::IsOppositeGrip2HTransitionWeapon(UInt32 weaponFormID)
+    {
+        return s_oppositeGrip2H.active && weaponFormID != 0 &&
+            s_oppositeGrip2H.weaponFormID == weaponFormID;
+    }
+
+    bool VRInputHandler::ShouldSuppressHiggsPhysicsSound()
+    {
+        // Once armed, every HIGGS grab/drop sound associated with the short
+        // collision-reference/equipped-weapon handoff is transitional.
+        if (s_oppositeGrip2H.active)
+            return true;
+
+        const ULONGLONG releaseSuppressUntil =
+            s_oppositeGripReleaseSoundSuppressUntilMs.load(
+                std::memory_order_acquire);
+        if (releaseSuppressUntil != 0 &&
+            GetTickCount64() < releaseSuppressUntil)
+        {
+            return true;
+        }
+
+        if (!twoHandedTrackingEnabled || !higgsInterface)
+            return false;
+
+        EquipManager* equipMgr = EquipManager::GetSingleton();
+        if (!equipMgr)
+            return false;
+
+        // The first HIGGS grab sound is emitted immediately before its grabbed
+        // callback, so the transition is not armed yet.  Recognize that exact
+        // pre-callback state from the tracked collision reference, the owner
+        // HIGGS hand, the live support grip, and controller proximity.
+        for (int hand = 0; hand < 2; ++hand)
+        {
+            const bool ownerGameHandIsLeft = hand != 0;
+            TESObjectREFR* collisionRef =
+                equipMgr->GetDroppedWeaponRef(ownerGameHandIsLeft);
+            if (!IsDroppedWeaponRefReadable(collisionRef) ||
+                !collisionRef->baseForm ||
+                !IsTwoHandedMeleeBaseForm(collisionRef->baseForm))
+            {
+                continue;
+            }
+
+            const bool ownerVRControllerIsLeft =
+                GameHandToVRController(ownerGameHandIsLeft);
+            const bool supportVRControllerIsLeft = !ownerVRControllerIsLeft;
+            TESObjectREFR* ownerHeld =
+                higgsInterface->GetGrabbedObject(ownerVRControllerIsLeft);
+            if (ownerHeld != collisionRef ||
+                !IsRawControllerGripDownNow(supportVRControllerIsLeft))
+            {
+                continue;
+            }
+
+            float controllerDistance = 9999.0f;
+            if (TryGetVRControllerSeparation(
+                    ownerVRControllerIsLeft,
+                    supportVRControllerIsLeft,
+                    controllerDistance) &&
+                controllerDistance <= kOppositeGripMaxControllerDistance)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
     // ============================================
     // HIGGS Callback Handlers
     // ============================================
@@ -1289,6 +2005,16 @@ loggedOnce = true;
     
   // Poll trigger button state each frame
         PollTriggerState();
+
+        // Opposite-hand support grip is an independent temporary equip state.
+        // Process it after polling so grip release is authoritative, and before
+        // normal pending auto-unequip so trigger logic cannot fight the hold.
+        UpdateOppositeGrip2HTransition(deltaTime);
+
+        // Skyrim VR's native Activate binding is suppressed while a trigger is
+        // held for Fake Edge's temporary weapon mode.  Re-emit only a fresh
+        // grip press against the current interaction target.
+        UpdateTriggerHeldPromptActivation();
 
         TryLogDualHand2HWeaponGrab();
         UpdateDoorStowForDual2HGrab();
@@ -1509,9 +2235,164 @@ handler->m_leftHandOnCooldown = false;
     }
 
     // Check if this is a valid tracked weapon (bows/bound/excluded items are skipped above)
-       if (!EquipManager::IsWeapon(baseForm))
-   {
-   return;
+    if (!EquipManager::IsWeapon(baseForm))
+    {
+    return;
+    }
+
+    // Once an opposite-grip transition owns this form, every later HIGGS grab
+    // callback for the same weapon is transitional.  In particular, after the
+    // world copy is recovered the dropped-ref tracking is intentionally gone;
+    // allowing a re-arm callback to fall through to the original auto-pickup
+    // path can consume the newly equipped weapon or assign it to the other hand.
+    if (s_oppositeGrip2H.active &&
+        s_oppositeGrip2H.weaponFormID == baseForm->formID)
+    {
+        _MESSAGE(
+            "[FalseEdgeVR] Ignored transitional 2H grab callback: form=0x%08X "
+            "owner-game-hand=%s callback-controller=%s",
+            baseForm->formID,
+            s_oppositeGrip2H.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+            isLeftVRController ? "LEFT" : "RIGHT");
+        return;
+    }
+
+    // A second HIGGS hand grabbing the same physical 2H collision weapon is a
+    // temporary combat-mode request, not a hand transfer.  Keep the original
+    // hand authoritative, preserve the opposite controller as HIGGS's support
+    // hand, and let the per-frame state machine equip/restore around that grip.
+    EquipManager* equipMgr = EquipManager::GetSingleton();
+    bool otherGameHandIsLeft = !isLeftGameHand;
+    TESObjectREFR* otherHandDroppedWeapon =
+        equipMgr->GetDroppedWeaponRef(otherGameHandIsLeft);
+    bool isHandSwap =
+        (otherHandDroppedWeapon == grabbedRefr) ||
+        (equipMgr->GetDroppedWeaponRefID(otherGameHandIsLeft) == grabbedRefr->formID &&
+         grabbedRefr->formID != 0);
+
+    if (twoHandedTrackingEnabled &&
+        IsTwoHandedMeleeBaseForm(baseForm) &&
+        isHandSwap)
+    {
+        const bool ownerVRControllerIsLeft =
+            GameHandToVRController(otherGameHandIsLeft);
+        float controllerDistance = 9999.0f;
+        const bool haveControllerDistance = TryGetVRControllerSeparation(
+            ownerVRControllerIsLeft,
+            isLeftVRController,
+            controllerDistance);
+
+        // Always block the transfer, but do not arm a collision->weapon
+        // conversion when the support controller is distant or its position
+        // cannot be verified.  This makes a distant grip a true no-op.
+        if (!haveControllerDistance ||
+            controllerDistance > kOppositeGripMaxControllerDistance)
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Blocked distant 2H support grab without conversion: "
+                "form=0x%08X controller-distance=%.2f distance-valid=%d "
+                "max-distance=%.2f",
+                baseForm->formID,
+                controllerDistance,
+                haveControllerDistance ? 1 : 0,
+                kOppositeGripMaxControllerDistance);
+            return;
+        }
+
+        if (!s_oppositeGrip2H.active)
+        {
+            s_oppositeGrip2H.active = true;
+            s_oppositeGrip2H.ownerGameHandIsLeft = otherGameHandIsLeft;
+            s_oppositeGrip2H.supportVRControllerIsLeft = isLeftVRController;
+            s_oppositeGrip2H.equipQueued = false;
+            s_oppositeGrip2H.equippedObserved = false;
+            // OnGrabbed itself proves the support input was engaged even if
+            // OpenVR's cached grip state is not updated until the next poll.
+            s_oppositeGrip2H.gripObservedHeld = true;
+            s_oppositeGrip2H.weaponFormID = baseForm->formID;
+            s_oppositeGrip2H.collisionRefID = grabbedRefr->formID;
+            s_oppositeGrip2H.equipWaitTimer = 0.0f;
+            const bool ownerVRControllerIsLeft =
+                GameHandToVRController(otherGameHandIsLeft);
+            s_oppositeGrip2H.ownerGripWasHeld = ownerVRControllerIsLeft ?
+                s_leftGripPressed : s_rightGripPressed;
+
+            // Silence the base weapon's native pickup/putdown descriptors for
+            // the duration of the inventory/world conversion.  Fake Edge's
+            // own transition sounds are independently disabled in EquipManager.
+            TESObjectWEAP* transitionWeapon =
+                DYNAMIC_CAST(baseForm, TESForm, TESObjectWEAP);
+            if (transitionWeapon)
+            {
+                s_oppositeGrip2H.savedNativePickUpSound =
+                    transitionWeapon->pickupSounds.pickUp;
+                s_oppositeGrip2H.savedNativePutDownSound =
+                    transitionWeapon->pickupSounds.putDown;
+                transitionWeapon->pickupSounds.pickUp = nullptr;
+                transitionWeapon->pickupSounds.putDown = nullptr;
+                s_oppositeGrip2H.nativeWeaponSoundsMuted = true;
+            }
+
+            // For a right-owned collision weapon, suspend LEFT support
+            // immediately to avoid a transient ownership transfer.
+            // For a left-owned collision weapon, RIGHT support must first be
+            // allowed to establish a genuine HIGGS two-hand grip; otherwise the
+            // callback is a false success that the player cannot actually feel.
+            const bool waitForPhysicalSupportGrip = otherGameHandIsLeft;
+            s_oppositeGrip2H.twoHandGrabValidated = !waitForPhysicalSupportGrip;
+            if (!waitForPhysicalSupportGrip && higgsInterface)
+            {
+                higgsInterface->DisableHand(isLeftVRController);
+                s_oppositeGrip2H.higgsSupportHandDisabled = true;
+            }
+            else if (waitForPhysicalSupportGrip)
+            {
+                _MESSAGE(
+                    "[FalseEdgeVR] Waiting for physical RIGHT support grip on "
+                    "left-owned collision weapon: form=0x%08X ref=0x%08X",
+                    baseForm->formID,
+                    grabbedRefr->formID);
+            }
+
+            // A trigger-release timer from the owner hand must not holster the
+            // weapon while the independent support-grip state is taking over.
+            if (otherGameHandIsLeft)
+            {
+                s_pendingTriggerUnequipLeft = false;
+                s_triggerUnequipTimerLeft = 0.0f;
+            }
+            else
+            {
+                s_pendingTriggerUnequipRight = false;
+                s_triggerUnequipTimerRight = 0.0f;
+            }
+
+            _MESSAGE(
+                "[FalseEdgeVR] Opposite grip armed 2H transition: form=0x%08X "
+                "owner-game-hand=%s support-controller=%s controller-distance=%.2f "
+                "(hand transfer blocked; support-state=%s; native sounds muted)",
+                baseForm->formID,
+                otherGameHandIsLeft ? "LEFT" : "RIGHT",
+                isLeftVRController ? "LEFT" : "RIGHT",
+                controllerDistance,
+                waitForPhysicalSupportGrip ? "awaiting-physical-grip" : "suspended-for-conversion");
+        }
+        else
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Ignored duplicate 2H support grab while transition active: "
+                "form=0x%08X support-controller=%s",
+                baseForm->formID,
+                isLeftVRController ? "LEFT" : "RIGHT");
+        }
+
+        _MESSAGE(
+            "[FalseEdgeVR] Blocked 2H hand-transfer path: form=0x%08X "
+            "owner-game-hand=%s support-game-hand=%s (grip input unchanged)",
+            baseForm->formID,
+            otherGameHandIsLeft ? "LEFT" : "RIGHT",
+            isLeftGameHand ? "LEFT" : "RIGHT");
+        return;
     }
   
    // Check if this grab is from our collision avoidance system
@@ -1572,16 +2453,6 @@ if (EquipManager::PlayerHasTwoHandedEquipped())
        // to prevent trigger press on old controller re-equipping it
         // ============================================
 
-          bool otherHandIsLeft = !isLeftVRController;
-            bool otherGameHandIsLeft = !isLeftGameHand;
-            EquipManager* equipMgr = EquipManager::GetSingleton();
-            TESObjectREFR* otherHandDroppedWeapon = equipMgr->GetDroppedWeaponRef(otherGameHandIsLeft);
-
-            bool isHandSwap =
-                (otherHandDroppedWeapon == grabbedRefr) ||
-                (equipMgr->GetDroppedWeaponBaseID(otherGameHandIsLeft) == baseForm->formID &&
-                 equipMgr->GetDroppedWeaponBaseID(otherGameHandIsLeft) != 0);
-
             if (otherHandDroppedWeapon == grabbedRefr || isHandSwap)
             {
                 equipMgr->TransferFavoriteCacheForHandSwap(otherGameHandIsLeft, isLeftGameHand, baseForm->formID);
@@ -1638,6 +2509,30 @@ handler->m_autoEquipTimerLeft = 0.0f;
 
         // Convert VR controller to game hand
      bool isLeftGameHand = VRControllerToGameHand(isLeftVRController);
+
+        // Activating a world object that HIGGS currently holds can emit drop
+        // callbacks for either physical hand.  Swallow those callbacks for the
+        // active transition: raw grip polling, not the disappearing reference,
+        // decides when the support hand actually released.
+        TESForm* droppedBaseForm = droppedRefr->baseForm;
+        const bool isTransitionDrop =
+            s_oppositeGrip2H.active && droppedBaseForm &&
+            droppedBaseForm->formID == s_oppositeGrip2H.weaponFormID &&
+            (droppedRefr->formID == s_oppositeGrip2H.collisionRefID ||
+             s_oppositeGrip2H.equipQueued);
+
+        if (isTransitionDrop && twoHandedTrackingEnabled &&
+            IsTwoHandedMeleeBaseForm(droppedBaseForm) &&
+            s_oppositeGrip2H.active)
+        {
+            _MESSAGE(
+                "[FalseEdgeVR] Ignored transitional 2H drop callback: form=0x%08X "
+                "owner-game-hand=%s callback-controller=%s (raw grip remains authoritative)",
+                droppedBaseForm->formID,
+                s_oppositeGrip2H.ownerGameHandIsLeft ? "LEFT" : "RIGHT",
+                isLeftVRController ? "LEFT" : "RIGHT");
+            return;
+        }
    
         const char* vrControllerName = isLeftVRController ? "Left" : "Right";
         const char* gameHandName = isLeftGameHand ? "Left" : "Right";
@@ -2352,6 +3247,10 @@ if (m_autoEquipPendingLeft && m_autoEquipWeaponLeft)
         s_leftTriggerBeforeRight = false;
         s_dualTriggerLeftRestoreIssued = false;
 
+        s_oppositeGripReleaseSoundSuppressUntilMs.store(
+            0, std::memory_order_release);
+        ResetOppositeGrip2HTransition();
+
         s_wasPlayerMounted = IsPlayerMounted();
 
         // Clear shield bash tracking completely on death/load
@@ -2803,7 +3702,14 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
 
             // === GRIP ===
             s_leftGripWasPressed = s_leftGripPressed;
-            s_leftGripPressed = (leftState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+            const bool leftDigitalGrip =
+                (leftState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+            const bool leftAxis2Pressed =
+                (leftState.ulButtonPressed & GRIP_AXIS2_BUTTON_MASK) != 0;
+            const bool leftAnalogGrip =
+                leftState.rAxis[2].x > GRIP_ANALOG_PRESS_THRESHOLD;
+            s_leftGripPressed =
+                leftDigitalGrip || leftAxis2Pressed || leftAnalogGrip;
 
             // Log grip press/release and handle grip spam detection for LEFT controller
             if (s_leftGripPressed && !s_leftGripWasPressed)
@@ -2895,7 +3801,14 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
 
             // === GRIP ===
             s_rightGripWasPressed = s_rightGripPressed;
-            s_rightGripPressed = (rightState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+            const bool rightDigitalGrip =
+                (rightState.ulButtonPressed & GRIP_BUTTON_MASK) != 0;
+            const bool rightAxis2Pressed =
+                (rightState.ulButtonPressed & GRIP_AXIS2_BUTTON_MASK) != 0;
+            const bool rightAnalogGrip =
+                rightState.rAxis[2].x > GRIP_ANALOG_PRESS_THRESHOLD;
+            s_rightGripPressed =
+                rightDigitalGrip || rightAxis2Pressed || rightAnalogGrip;
 
             // Log grip press/release and handle grip spam detection for RIGHT controller
             if (s_rightGripPressed && !s_rightGripWasPressed)
@@ -3252,7 +4165,8 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
             bool leftGameHandVRController = GameHandToVRController(true);
             bool leftWeaponIsLocked = leftGameHandVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
 
-            if (!leftVRTriggerNow && leftVRTriggerWas && !droppedWeaponLeft)
+            if (!leftVRTriggerNow && leftVRTriggerWas && !droppedWeaponLeft &&
+                !VRInputHandler::IsOppositeGrip2HActiveForGameHand(true))
             {
                 // Check if left hand has an equipped weapon
                 PlayerCharacter* player = *g_thePlayer;
@@ -3285,7 +4199,8 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
             bool rightGameHandVRController = GameHandToVRController(false);
             bool rightWeaponIsLocked = rightGameHandVRController ? s_leftWeaponLocked : s_rightWeaponLocked;
 
-            if (!rightVRTriggerNow && rightVRTriggerWas && !droppedWeaponRight)
+            if (!rightVRTriggerNow && rightVRTriggerWas && !droppedWeaponRight &&
+                !VRInputHandler::IsOppositeGrip2HActiveForGameHand(false))
             {
                 // Check if right hand has an equipped weapon
                 PlayerCharacter* player = *g_thePlayer;
@@ -3321,6 +4236,16 @@ if (leftGrabbed && leftGrabbed->baseForm && leftGrabbed->baseForm->formType == k
                     continue;
 
                 float& timer = isLeftHand ? s_triggerUnequipTimerLeft : s_triggerUnequipTimerRight;
+
+                // Opposite grip owns this temporary equipped state.  Cancel any
+                // stale trigger-release timer instead of allowing it to holster
+                // the weapon out from under the support hand.
+                if (VRInputHandler::IsOppositeGrip2HActiveForGameHand(isLeftHand))
+                {
+                    pending = false;
+                    timer = 0.0f;
+                    continue;
+                }
 
                 // CANCEL if this hand's own trigger is pressed again
                 bool handVRController = GameHandToVRController(isLeftHand);

@@ -201,6 +201,10 @@ namespace FalseEdgeVR
         // to avoid the same-frame pickup/equip race (weapon "disappearing").
         void ScheduleForceReequip(bool isLeftHand);
 
+        // Queue an explicit game-thread equip without relying on the cached
+        // hand that SafeActivate/HIGGS may rewrite during a two-hand pickup.
+        void ScheduleEquipWeaponToGameHand(UInt32 weaponFormID, bool isLeftGameHand);
+
         // Equip a weapon to a game hand, preserving tempering/enchant/favorite extra data.
         void EquipWeaponToGameHand(PlayerCharacter* player, TESForm* weaponForm, bool isLeftGameHand);
 
